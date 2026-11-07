@@ -1,0 +1,623 @@
+<title>AutoCharge Test Bench</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Barlow+Semi+Condensed:wght@500;600;700&family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&display=swap">
+<style>
+/* Layout: simulator-console. Scenario rail on the left, replay stage + live status panel,
+   then synced telemetry charts, criteria and the pytest ledger. Dark-first like the sim HUD. */
+:root {
+  color-scheme: dark;
+  --bg: #0d1319;
+  --panel: #141c25;
+  --panel-2: #1a2430;
+  --line: rgba(214, 228, 245, 0.09);
+  --line-strong: rgba(214, 228, 245, 0.18);
+  --fg: #e7edf3;
+  --fg-2: #aab6c3;
+  --muted: #7d8a98;
+  --accent: #46a8ff;
+  --accent-ink: #07131f;
+  --grid: #24303d;
+  --axis: #3a4756;
+  --s1: #3987e5;
+  --s2: #d95926;
+  --raw: #6f7c8a;
+  --good: #0ca30c;
+  --good-ink: #2fc42f;
+  --warning: #fab219;
+  --serious: #ec835a;
+  --critical: #d03b3b;
+  --critical-ink: #f07070;
+  --ph-approach: #86b6ef;
+  --ph-align: #3987e5;
+  --ph-insert: #1c5cab;
+  --ph-hold: #3987e5;
+  --stage: #0a0f14;
+  --font-display: "Barlow Semi Condensed", "Arial Narrow", system-ui, sans-serif;
+  --font-body: "IBM Plex Sans", system-ui, -apple-system, "Segoe UI", sans-serif;
+  --font-mono: "IBM Plex Mono", ui-monospace, "Cascadia Mono", Consolas, monospace;
+  --radius: 10px;
+}
+@media (prefers-color-scheme: light) {
+  :root:not([data-theme="dark"]) {
+    color-scheme: light;
+    --bg: #eef2f6; --panel: #ffffff; --panel-2: #f4f7fa;
+    --line: rgba(15, 30, 50, 0.10); --line-strong: rgba(15, 30, 50, 0.20);
+    --fg: #0f1822; --fg-2: #44515f; --muted: #66727f;
+    --accent: #1f6fd1; --accent-ink: #ffffff;
+    --grid: #e1e6ec; --axis: #c3cbd4;
+    --s1: #2a78d6; --s2: #eb6834; --raw: #9aa4ae;
+    --good-ink: #006300; --critical-ink: #b42b2b;
+    --ph-approach: #9ec5f4; --ph-align: #3987e5; --ph-insert: #1c5cab; --ph-hold: #3987e5;
+    --stage: #dfe5ec;
+  }
+}
+:root[data-theme="light"] {
+  color-scheme: light;
+  --bg: #eef2f6; --panel: #ffffff; --panel-2: #f4f7fa;
+  --line: rgba(15, 30, 50, 0.10); --line-strong: rgba(15, 30, 50, 0.20);
+  --fg: #0f1822; --fg-2: #44515f; --muted: #66727f;
+  --accent: #1f6fd1; --accent-ink: #ffffff;
+  --grid: #e1e6ec; --axis: #c3cbd4;
+  --s1: #2a78d6; --s2: #eb6834; --raw: #9aa4ae;
+  --good-ink: #006300; --critical-ink: #b42b2b;
+  --ph-approach: #9ec5f4; --ph-align: #3987e5; --ph-insert: #1c5cab; --ph-hold: #3987e5;
+  --stage: #dfe5ec;
+}
+
+* { box-sizing: border-box; }
+body {
+  background: var(--bg); color: var(--fg);
+  font: 14px/1.5 var(--font-body);
+  padding-left: max(16px, env(safe-area-inset-left, 0px));
+  padding-right: max(16px, env(safe-area-inset-right, 0px));
+  padding-block: 20px 40px;
+}
+.wrap { max-width: 1320px; margin-inline: auto; display: grid; gap: 20px; }
+h1, h2, h3 { font-family: var(--font-display); font-weight: 600; margin: 0; text-wrap: balance; letter-spacing: 0.01em; }
+h1 { font-size: 30px; line-height: 1.1; }
+h2 { font-size: 22px; line-height: 1.2; }
+h3 { font-size: 15px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--fg-2); font-weight: 600; }
+p { margin: 0; }
+.mono { font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
+.muted { color: var(--muted); }
+.panel { background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); }
+button, select { font: inherit; color: inherit; }
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+/* Header */
+.top { display: flex; flex-wrap: wrap; gap: 12px 24px; align-items: end; justify-content: space-between; }
+.brand { display: grid; gap: 4px; }
+.eyebrow { font-family: var(--font-display); text-transform: uppercase; letter-spacing: 0.14em; font-size: 12px; color: var(--accent); font-weight: 600; }
+.meta { display: flex; flex-wrap: wrap; gap: 6px 16px; color: var(--muted); font-size: 12.5px; }
+.meta b { color: var(--fg-2); font-weight: 500; }
+
+.verdict { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 12px; }
+.tile { padding: 14px 16px; display: grid; gap: 2px; }
+.tile .big { font-family: var(--font-display); font-size: 30px; font-weight: 600; line-height: 1.1; }
+.tile .lbl { color: var(--fg-2); font-size: 13px; }
+
+/* Status chips: icon + label, never color alone */
+.chip { display: inline-flex; align-items: center; gap: 6px; padding: 2px 9px 2px 7px; border-radius: 999px;
+  font-size: 12px; font-weight: 600; border: 1px solid var(--line-strong); white-space: nowrap; background: var(--panel-2); }
+.chip svg { width: 14px; height: 14px; flex: none; }
+.chip.good svg { color: var(--good); } .chip.bad svg { color: var(--critical); } .chip.info svg { color: var(--accent); }
+.dot { width: 9px; height: 9px; border-radius: 50%; display: inline-block; flex: none; }
+
+/* Main grid */
+.main { display: grid; grid-template-columns: 270px minmax(0, 1fr); gap: 20px; align-items: start; }
+.rail { display: grid; gap: 6px; position: sticky; top: calc(env(safe-area-inset-top, 0px) + 12px); }
+.rail h3 { padding: 0 4px 4px; }
+.scn { display: grid; grid-template-columns: 1fr auto; gap: 2px 8px; text-align: left; padding: 10px 12px;
+  background: var(--panel); border: 1px solid var(--line); border-radius: 8px; cursor: pointer; }
+.scn:hover { border-color: var(--line-strong); }
+.scn[aria-current="true"] { border-color: var(--accent); box-shadow: inset 3px 0 0 var(--accent); }
+.scn .nm { font-weight: 600; font-size: 13.5px; line-height: 1.3; }
+.scn .oc { grid-column: 1 / -1; font-size: 12px; color: var(--muted); }
+.scn .ok { width: 16px; height: 16px; }
+
+.content { display: grid; gap: 16px; min-width: 0; }
+.head { display: grid; gap: 8px; }
+.head .q { color: var(--fg-2); max-width: 75ch; }
+.head .row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+
+/* Stage */
+.stage-grid { display: grid; grid-template-columns: minmax(0, 1fr) 300px; gap: 16px; align-items: start; }
+.stage { position: relative; background: var(--stage); border-radius: var(--radius); overflow: hidden; border: 1px solid var(--line); aspect-ratio: 4 / 3; max-width: 100%; }
+.stage canvas { width: 100%; height: 100%; display: block; }
+.inset { position: absolute; top: 12px; left: 12px; width: 32%; min-width: 120px; border-radius: 8px; overflow: hidden;
+  border: 1px solid rgba(255,255,255,0.25); background: #000; box-shadow: 0 6px 18px rgba(0,0,0,0.35); }
+.inset canvas { aspect-ratio: 4 / 3; height: auto; }
+.cap { position: absolute; left: 0; right: 0; top: 0; padding: 4px 8px; font: 600 11px/1.3 var(--font-display);
+  letter-spacing: 0.08em; text-transform: uppercase; color: #fff; background: linear-gradient(rgba(0,0,0,0.65), rgba(0,0,0,0)); }
+.stage > .cap { padding: 8px 12px; text-align: right; }
+.loading { position: absolute; inset: 0; display: grid; place-items: center; color: var(--muted); font-size: 13px; }
+
+.side { display: grid; gap: 12px; }
+.hud { padding: 14px; display: grid; gap: 12px; }
+.hud .state { display: flex; align-items: center; gap: 8px; font-family: var(--font-display); font-size: 20px; font-weight: 600; text-transform: capitalize; }
+.kv { display: grid; grid-template-columns: auto 1fr; gap: 3px 12px; font-size: 13px; }
+.kv dt { color: var(--muted); }
+.kv dd { margin: 0; text-align: right; font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
+.sep { height: 1px; background: var(--line); }
+.bar { height: 8px; border-radius: 4px; background: var(--panel-2); border: 1px solid var(--line); overflow: hidden; }
+.bar i { display: block; height: 100%; background: var(--accent); width: 0; }
+.close { position: relative; border-radius: var(--radius); overflow: hidden; border: 1px solid var(--line); background: var(--stage); aspect-ratio: 4 / 3; max-width: 100%; }
+.close canvas { width: 100%; height: 100%; display: block; }
+
+/* Transport */
+.transport { padding: 12px 14px; display: grid; gap: 10px; }
+.tbar { display: flex; flex-wrap: wrap; align-items: center; gap: 10px 14px; }
+.play { width: 38px; height: 38px; border-radius: 50%; border: none; background: var(--accent); color: var(--accent-ink); cursor: pointer; display: grid; place-items: center; flex: none; }
+.play svg { width: 16px; height: 16px; }
+.time { font-family: var(--font-mono); font-size: 13px; }
+.speed { display: inline-flex; border: 1px solid var(--line-strong); border-radius: 7px; overflow: hidden; }
+.speed button { background: transparent; border: 0; padding: 4px 9px; font-size: 12px; cursor: pointer; color: var(--fg-2); }
+.speed button[aria-pressed="true"] { background: var(--panel-2); color: var(--fg); font-weight: 600; }
+.track { position: relative; height: 34px; }
+.strip { position: absolute; left: 0; right: 0; top: 8px; height: 16px; border-radius: 4px; overflow: hidden; display: flex; background: var(--panel-2); }
+.strip span { height: 100%; display: flex; align-items: center; justify-content: center; font: 600 10px/1 var(--font-display);
+  letter-spacing: 0.06em; text-transform: uppercase; color: #fff; overflow: hidden; white-space: nowrap; border-right: 2px solid var(--panel); }
+.ticks { position: absolute; inset: 0; pointer-events: none; }
+.ticks i { position: absolute; top: 2px; bottom: 2px; width: 2px; background: var(--fg); opacity: 0.55; border-radius: 1px; }
+.cursor { position: absolute; top: 0; bottom: 0; width: 2px; background: var(--fg); pointer-events: none; box-shadow: 0 0 0 2px var(--panel); }
+.track input { position: absolute; inset: 0; width: 100%; opacity: 0; cursor: pointer; margin: 0; }
+.legend { display: flex; flex-wrap: wrap; gap: 4px 14px; font-size: 12px; color: var(--fg-2); }
+.legend span { display: inline-flex; align-items: center; gap: 6px; }
+.legend .sw { width: 12px; height: 12px; border-radius: 3px; display: inline-block; }
+.legend .ln { width: 16px; height: 0; border-top: 2px solid; display: inline-block; }
+.legend .dash { width: 16px; height: 0; border-top: 2px dashed; display: inline-block; }
+
+/* Charts */
+.charts { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+.chart { padding: 12px 14px 8px; display: grid; gap: 6px; min-width: 0; position: relative; }
+.chart .ttl { display: flex; justify-content: space-between; gap: 8px; align-items: baseline; flex-wrap: wrap; }
+.chart .ttl b { font-weight: 600; font-size: 13.5px; }
+.chart .note { font-size: 11.5px; color: var(--muted); }
+.chart svg { width: 100%; height: 190px; display: block; overflow: visible; touch-action: pan-y; }
+.chart svg text { font: 11px var(--font-mono); fill: var(--muted); }
+.chart svg .lim-t { font: 600 10.5px var(--font-body); fill: var(--fg-2); }
+.tip { position: absolute; pointer-events: none; background: var(--panel-2); border: 1px solid var(--line-strong); border-radius: 6px;
+  padding: 6px 8px; font-size: 12px; box-shadow: 0 6px 16px rgba(0,0,0,0.25); white-space: nowrap; z-index: 2; }
+.tip .mono { font-size: 12px; }
+
+/* Criteria + events */
+.two { display: grid; grid-template-columns: minmax(0, 1.25fr) minmax(0, 1fr); gap: 12px; }
+.box { padding: 14px; display: grid; gap: 10px; align-content: start; min-width: 0; }
+.tablewrap { overflow-x: auto; }
+table { width: 100%; border-collapse: collapse; font-size: 13px; }
+th { text-align: left; font: 600 11px var(--font-display); text-transform: uppercase; letter-spacing: 0.08em; color: var(--muted); padding: 6px 8px; border-bottom: 1px solid var(--line-strong); }
+td { padding: 7px 8px; border-bottom: 1px solid var(--line); vertical-align: top; }
+td.num { font-family: var(--font-mono); font-variant-numeric: tabular-nums; white-space: nowrap; }
+tr:last-child td { border-bottom: 0; }
+.events { list-style: none; margin: 0; padding: 0; display: grid; gap: 2px; max-height: 280px; overflow: auto; }
+.events button { width: 100%; display: grid; grid-template-columns: 62px 1fr; gap: 8px; text-align: left; background: transparent; border: 0; padding: 5px 6px; border-radius: 6px; cursor: pointer; font-size: 12.5px; }
+.events button:hover { background: var(--panel-2); }
+.events .t { font-family: var(--font-mono); color: var(--muted); }
+.events .ph { font-weight: 600; text-transform: capitalize; }
+.linkbtn { background: none; border: 0; padding: 0; color: var(--accent); cursor: pointer; text-decoration: underline; text-underline-offset: 2px; font-size: 13px; }
+
+.notes ul { margin: 0; padding-left: 18px; display: grid; gap: 4px; color: var(--fg-2); max-width: 95ch; }
+code { font-family: var(--font-mono); font-size: 12.5px; background: var(--panel-2); border: 1px solid var(--line); padding: 1px 5px; border-radius: 4px; }
+
+@media (max-width: 1080px) {
+  .stage-grid { grid-template-columns: minmax(0, 1fr); }
+  .side { grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); }
+}
+@media (max-width: 880px) {
+  .main { grid-template-columns: minmax(0, 1fr); }
+  .rail { position: static; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); }
+  .rail h3 { grid-column: 1 / -1; }
+  .charts, .two { grid-template-columns: minmax(0, 1fr); }
+}
+@media (prefers-reduced-motion: reduce) { * { scroll-behavior: auto !important; } }
+</style>
+
+<div class="wrap">
+  <header class="top">
+    <div class="brand">
+      <span class="eyebrow">Team SOS · AutoCharger AI</span>
+      <h1>AutoCharge Test Bench</h1>
+      <p class="muted">Every automated test, replayed in MuJoCo: Google Robot, CCS2-style connector and flexible charging cable.</p>
+    </div>
+    <div class="meta" id="meta"></div>
+  </header>
+
+  <section class="verdict" id="verdict" aria-label="Summary"></section>
+
+  <div class="main">
+    <nav class="rail" id="rail" aria-label="Test scenarios"><h3>Scenarios</h3></nav>
+
+    <main class="content">
+      <div class="head">
+        <h2 id="s-title"></h2>
+        <p class="q" id="s-question"></p>
+        <div class="row" id="s-chips"></div>
+      </div>
+
+      <div class="stage-grid">
+        <div class="stage" id="stage">
+          <canvas id="cv-overview" width="768" height="576" aria-label="Overview camera"></canvas>
+          <div class="cap">Overview camera</div>
+          <div class="inset"><canvas id="cv-robot" width="256" height="192" aria-label="Robot camera on the connector"></canvas><div class="cap">Robot camera (RGB)</div></div>
+          <div class="loading" id="loading">Loading frames…</div>
+        </div>
+        <div class="side">
+          <div class="panel hud" aria-live="off">
+            <h3>Robot status</h3>
+            <div class="state"><span class="dot" id="h-dot"></span><span id="h-state"></span></div>
+            <dl class="kv">
+              <dt>Mode</dt><dd id="h-mode"></dd>
+              <dt>Action</dt><dd id="h-action" style="font-family:var(--font-body)"></dd>
+            </dl>
+            <div id="h-prog-wrap" style="display:grid;gap:4px">
+              <div style="display:flex;justify-content:space-between;font-size:12px"><span class="muted">Distance to seated</span><span class="mono" id="h-prog"></span></div>
+              <div class="bar"><i id="h-bar"></i></div>
+            </div>
+            <div class="sep"></div>
+            <dl class="kv" id="h-vals"></dl>
+          </div>
+          <div class="close"><canvas id="cv-closeup" width="640" height="480" aria-label="Side close-up of plug and socket"></canvas><div class="cap">Plug &amp; socket close-up</div></div>
+        </div>
+      </div>
+
+      <div class="panel transport">
+        <div class="tbar">
+          <button class="play" id="play" aria-label="Play"></button>
+          <span class="time" id="time"></span>
+          <div class="speed" role="group" aria-label="Playback speed" id="speed"></div>
+          <span class="muted" style="font-size:12px">Drag the timeline, or click a chart or event to jump.</span>
+        </div>
+        <div class="track" id="track">
+          <div class="strip" id="strip"></div>
+          <div class="ticks" id="ticks"></div>
+          <div class="cursor" id="cursor"></div>
+          <input type="range" id="scrub" min="0" max="1000" value="1000" step="1" aria-label="Simulation time">
+        </div>
+        <div class="legend" id="phase-legend"></div>
+      </div>
+
+      <div class="charts" id="charts"></div>
+
+      <div class="two">
+        <section class="panel box">
+          <h3>Pass criteria measured in this run</h3>
+          <div class="tablewrap"><table id="checks"></table></div>
+        </section>
+        <section class="panel box">
+          <h3>Controller event log</h3>
+          <ul class="events" id="events"></ul>
+        </section>
+      </div>
+    </main>
+  </div>
+
+  <section class="panel box" id="pytest-box">
+    <h3>Automated test suite (pytest)</h3>
+    <div class="tablewrap"><table id="pytest"></table></div>
+  </section>
+
+  <section class="panel box notes">
+    <h3>What these tests do not prove</h3>
+    <ul>
+      <li>The connector and inlet are simplified shapes, not the IEC 62196-3 drawing: no signal pins, latch or flap. "Seated" means 34 mm of pin engagement, not an electrical connection.</li>
+      <li>The cavities have clearance and no spring contacts, so a well-aligned insertion needs almost no force. A real CCS2 plug needs roughly 50–100 N.</li>
+      <li>Contact force is the physics solver's value. The controller acts on a 30 ms filtered signal (like a wrist force sensor); raw one-step peaks are shown in grey.</li>
+      <li>The controller is given the socket pose. "Socket estimate error" scenarios stand in for camera perception, which is not built yet.</li>
+      <li>Cable stiffness and weight are estimates, and the cable cannot collide with itself. The robot base does not drive.</li>
+    </ul>
+    <p class="muted" style="font-size:12.5px">Regenerate with <code>python scripts/visual_report.py</code> in the project folder. Full write-up: <code>docs/autocharge_cable_connector.md</code>.</p>
+  </section>
+</div>
+
+<script>
+const R = /*__REPORT_DATA__*/null;
+const $ = (id) => document.getElementById(id);
+const ICON = {
+  ok: '<svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="7" fill="currentColor"/><path d="M4.6 8.3l2.2 2.2 4.6-4.8" fill="none" stroke="#fff" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>',
+  bad: '<svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="7" fill="currentColor"/><path d="M5.3 5.3l5.4 5.4M10.7 5.3l-5.4 5.4" stroke="#fff" stroke-width="1.8" stroke-linecap="round"/></svg>',
+  info: '<svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="7" fill="currentColor"/><path d="M8 7.2v4M8 4.8v.1" stroke="#fff" stroke-width="1.8" stroke-linecap="round"/></svg>',
+  play: '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M4 2.5v11l9-5.5z" fill="currentColor"/></svg>',
+  pause: '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M4 2.5h3v11H4zM9 2.5h3v11H9z" fill="currentColor"/></svg>',
+};
+const PHASE = {
+  approach: { color: "var(--ph-approach)", action: "Moving to the 60 mm standoff" },
+  align: { color: "var(--ph-align)", action: "Checking alignment before insertion" },
+  insert: { color: "var(--ph-insert)", action: "Inserting at 5 mm/s" },
+  seated: { color: "var(--good)", action: "Connector seated, holding" },
+  retract: { color: "var(--serious)", action: "Backing out to the standoff" },
+  aborted: { color: "var(--critical)", action: "Stopped at standoff, retries used up" },
+  estop: { color: "var(--critical)", action: "Emergency stop: holding position" },
+  holding: { color: "var(--ph-hold)", action: "Holding the home pose" },
+  swinging: { color: "var(--ph-hold)", action: "Swinging the arm through waypoints" },
+};
+const OUTCOME = { seated: "Seated", aborted: "Aborted safely", estop: "Emergency stop held", stable: "Stable", unstable: "Unstable" };
+const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+const chip = (kind, text) => `<span class="chip ${kind}">${ICON[kind === "good" ? "ok" : kind === "bad" ? "bad" : "info"]}${esc(text)}</span>`;
+const fmt = (v, d = 1) => (v === undefined || v === null || Number.isNaN(v) ? "–" : Number(v).toFixed(d));
+
+/* ---------- header + summary ---------- */
+$("meta").innerHTML = [
+  ["MuJoCo", R.mujoco], ["Commit", R.commit || "–"], ["Generated", R.generated],
+  ["Cable", `${R.scene.cable_length_m} m, ${R.scene.segments} segments`],
+].map(([k, v]) => `<span>${k} <b class="mono">${esc(v)}</b></span>`).join("");
+
+const scPass = R.scenarios.filter((s) => s.passed).length;
+const pt = R.pytest;
+const ptPass = pt ? pt.tests.filter((t) => t.status === "passed").length : null;
+$("verdict").innerHTML = [
+  pt ? `<div class="panel tile"><span class="big">${ptPass} / ${pt.tests.length}</span><span class="lbl">${chip(ptPass === pt.tests.length ? "good" : "bad", ptPass === pt.tests.length ? "All automated tests passed" : "Some tests failed")} pytest, ${pt.wall_seconds} s</span></div>`
+     : `<div class="panel tile"><span class="big">–</span><span class="lbl">pytest not run for this report</span></div>`,
+  `<div class="panel tile"><span class="big">${scPass} / ${R.scenarios.length}</span><span class="lbl">${chip(scPass === R.scenarios.length ? "good" : "bad", scPass === R.scenarios.length ? "Scenarios met their criteria" : "Scenario criteria failed")} replayed below</span></div>`,
+  `<div class="panel tile"><span class="big">${fmt(R.limits.insert_speed_mm_s, 0)} mm/s</span><span class="lbl">Insertion speed, gated by ≤ ${fmt(R.limits.align_lateral_mm, 1)} mm alignment</span></div>`,
+  `<div class="panel tile"><span class="big">${fmt(R.limits.force_soft, 0)} / ${fmt(R.limits.force_max, 0)} N</span><span class="lbl">Contact force: pause / retract limits</span></div>`,
+].join("");
+
+/* ---------- scenario rail ---------- */
+R.scenarios.forEach((s) => {
+  const b = document.createElement("button");
+  b.className = "scn"; b.id = "btn-" + s.id; b.type = "button";
+  b.innerHTML = `<span class="nm">${esc(s.title)}</span><span class="ok" style="color:${s.passed ? "var(--good)" : "var(--critical)"}" title="${s.passed ? "Criteria met" : "Criteria failed"}">${s.passed ? ICON.ok : ICON.bad}</span><span class="oc">${esc(OUTCOME[s.summary.outcome] || s.summary.outcome)} · ${s.passed ? "criteria met" : "criteria failed"}</span>`;
+  b.onclick = () => { location.hash = s.id; };
+  $("rail").appendChild(b);
+});
+
+/* ---------- state ---------- */
+let S = null, T = 0, playing = false, speed = 4, lastTs = 0;
+const images = {};
+const SPEEDS = [1, 2, 4, 8];
+$("speed").innerHTML = SPEEDS.map((v) => `<button type="button" data-v="${v}">${v}×</button>`).join("");
+$("speed").onclick = (e) => { const v = +e.target.dataset.v; if (v) { speed = v; syncSpeed(); } };
+function syncSpeed() { [...$("speed").children].forEach((b) => b.setAttribute("aria-pressed", +b.dataset.v === speed)); }
+
+function loadImg(src) {
+  if (!images[src]) {
+    const im = new Image();
+    im.decoding = "async";
+    images[src] = new Promise((res) => { im.onload = () => res(im); im.onerror = () => res(null); });
+    im.src = src;
+  }
+  return images[src];
+}
+
+function select(id) {
+  const s = R.scenarios.find((x) => x.id === id) || R.scenarios[0];
+  S = s; playing = false;
+  document.querySelectorAll(".scn").forEach((b) => b.setAttribute("aria-current", b.id === "btn-" + s.id));
+  $("s-title").textContent = s.title;
+  $("s-question").textContent = s.question;
+  $("s-chips").innerHTML = [
+    chip(s.passed ? "good" : "bad", s.passed ? "Criteria met" : "Criteria failed"),
+    chip("info", "Result: " + (OUTCOME[s.summary.outcome] || s.summary.outcome)),
+    `<span class="muted" style="font-size:13px">Expected: ${esc(s.expected)}</span>`,
+  ].join("");
+  $("h-mode").textContent = s.kind === "insertion" ? "Autonomous insertion" : s.kind === "swing" ? "Scripted arm motion" : "Servo hold, no controller";
+  $("h-prog-wrap").hidden = s.kind !== "insertion";
+  buildStrip(); buildCharts(); buildChecks(); buildEvents();
+  $("loading").hidden = false;
+  Promise.all(["overview", "robot", "closeup"].map((c) => loadImg(s.sprites.files[c]))).then(() => { if (S === s) { $("loading").hidden = true; render(); } });
+  T = s.duration; // open on the final state: the evidence
+  speed = s.duration > 25 ? 8 : 4; syncSpeed();
+  render();
+}
+
+/* ---------- timeline ---------- */
+function segments(s) {
+  const out = []; let cur = null;
+  s.samples.forEach((p) => { if (!cur || cur.phase !== p.phase) { cur = { phase: p.phase, t0: p.t, t1: p.t }; out.push(cur); } cur.t1 = p.t; });
+  out.forEach((g, i) => { if (out[i + 1]) g.t1 = out[i + 1].t0; });
+  return out;
+}
+function buildStrip() {
+  const s = S, d = s.duration || 1, segs = segments(s);
+  $("strip").innerHTML = segs.map((g) => {
+    const w = ((g.t1 - g.t0) / d) * 100;
+    return `<span style="width:${w}%;background:${PHASE[g.phase]?.color || "var(--muted)"}" title="${esc(g.phase)} ${fmt(g.t0)}–${fmt(g.t1)} s">${w > 9 ? esc(g.phase) : ""}</span>`;
+  }).join("");
+  $("ticks").innerHTML = s.events.map((e) => `<i style="left:calc(${(e.t / d) * 100}% - 1px)" title="${fmt(e.t, 2)} s · ${esc(e.text)}"></i>`).join("");
+  const used = [...new Set(segs.map((g) => g.phase))];
+  $("phase-legend").innerHTML = used.map((p) => `<span><i class="sw" style="background:${PHASE[p]?.color}"></i>${esc(p)}</span>`).join("") +
+    `<span><i class="ln" style="border-color:var(--fg);opacity:.55;height:10px;border-top:0;border-left:2px solid;width:0"></i>controller event</span>`;
+}
+
+/* ---------- charts ---------- */
+function chartSpecs(s) {
+  const L = s.limits;
+  if (s.kind === "insertion") return [
+    { title: "Plug offset from the socket axis", unit: "mm", d: 2, series: [{ k: "lat", name: "lateral offset", c: "var(--s1)" }],
+      lims: [{ v: L.align_lateral_mm, name: "alignment gate", c: "var(--warning)" }, { v: L.insert_lateral_max_mm, name: "abort", c: "var(--critical)" }] },
+    { title: "Plug position along the socket axis", unit: "mm", d: 1, series: [{ k: "ax", name: "position", c: "var(--s1)" }],
+      lims: [{ v: L.standoff_mm, name: "standoff", c: "var(--axis)", ref: true }, { v: L.pin_contact_mm, name: "pins reach socket", c: "var(--axis)", ref: true }, { v: L.seat_mm, name: "seated", c: "var(--good)", ref: true }],
+      note: "0 mm = plug face on the socket face" },
+    { title: "Contact force, connector on socket", unit: "N", d: 1,
+      series: [{ k: "fr", name: "raw solver peak (0.1 s)", c: "var(--raw)", thin: true, clip: true }, { k: "f", name: "filtered (controller input)", c: "var(--s1)" }],
+      lims: [{ v: L.force_soft, name: "pause", c: "var(--warning)" }, { v: L.force_max, name: "retract", c: "var(--critical)" }] },
+    { title: "Cable load", unit: "N", d: 1,
+      series: [{ k: "ten", name: "max tension along cable", c: "var(--s1)" }, { k: "sr", name: "load on connector boot", c: "var(--s2)" }],
+      lims: [{ v: L.tension_max, name: "tension limit", c: "var(--critical)" }, { v: L.strain_relief_max, name: "boot limit", c: "var(--serious)" }] },
+  ];
+  const hold = s.kind === "hold";
+  return [
+    { title: "Cable stretch (largest edge)", unit: "%", d: 2, series: [{ k: "strain", name: "stretch", c: "var(--s1)" }],
+      lims: [{ v: hold ? 1.5 : 3.0, name: "test limit", c: "var(--critical)" }] },
+    { title: "Lowest cable point vs floor", unit: "mm", d: 1, series: [{ k: "clr", name: "clearance", c: "var(--s1)" }],
+      lims: [{ v: hold ? -2 : -4, name: "test limit", c: "var(--critical)" }, { v: 0, name: "floor", c: "var(--axis)", ref: true }], note: "below 0 = penetration" },
+    { title: "Cable load", unit: "N", d: 1,
+      series: [{ k: "ten", name: "max tension along cable", c: "var(--s1)" }, { k: "sr", name: "load on connector boot", c: "var(--s2)" }],
+      lims: hold ? [{ v: 15, name: "test limit", c: "var(--critical)" }] : [] },
+    { title: "Fastest-moving cable point", unit: "m/s", d: 3, series: [{ k: "spd", name: "speed", c: "var(--s1)" }],
+      lims: hold ? [{ v: 0.2, name: "settled limit (at end)", c: "var(--warning)" }] : [] },
+  ];
+}
+function niceTicks(lo, hi, n = 4) {
+  const span = hi - lo || 1, raw = span / n, mag = Math.pow(10, Math.floor(Math.log10(raw)));
+  const step = [1, 2, 2.5, 5, 10].map((m) => m * mag).find((x) => span / x <= n) || 10 * mag;
+  const out = []; for (let v = Math.ceil(lo / step) * step; v <= hi + 1e-9; v += step) out.push(+v.toFixed(10));
+  return out;
+}
+let charts = [];
+function buildCharts() {
+  const host = $("charts"); host.innerHTML = ""; charts = [];
+  chartSpecs(S).forEach((spec, i) => {
+    const el = document.createElement("div"); el.className = "panel chart";
+    const two = spec.series.length > 1;
+    el.innerHTML = `<div class="ttl"><b>${esc(spec.title)} <span class="muted" style="font-weight:400">(${spec.unit})</span></b>${spec.note ? `<span class="note">${esc(spec.note)}</span>` : ""}</div>
+      ${two ? `<div class="legend">${spec.series.map((x) => `<span><i class="ln" style="border-color:${x.c}"></i>${esc(x.name)}</span>`).join("")}</div>` : ""}
+      <svg role="img" aria-label="${esc(spec.title)} over time"></svg><div class="tip" hidden></div><div class="note" data-off></div>`;
+    host.appendChild(el);
+    const c = { spec, el, svg: el.querySelector("svg"), tip: el.querySelector(".tip"), off: el.querySelector("[data-off]") };
+    charts.push(c); drawChart(c);
+    c.svg.addEventListener("pointermove", (e) => hover(c, e));
+    c.svg.addEventListener("pointerleave", () => { c.tip.hidden = true; c.svg.querySelector(".hx")?.setAttribute("opacity", 0); });
+    c.svg.addEventListener("click", (e) => { T = c.xinv(e); playing = false; render(); });
+  });
+}
+function drawChart(c) {
+  const { spec, svg } = c, data = S.samples, W = Math.max(260, svg.clientWidth || 520), H = 190;
+  const m = { l: 48, r: 14, t: 10, b: 24 };
+  const vals = []; spec.series.forEach((s) => { if (!s.clip) data.forEach((p) => vals.push(p[s.k])); });
+  let lo = Math.min(...vals), hi = Math.max(...vals);
+  const dmax = Math.max(Math.abs(lo), Math.abs(hi), 1e-6);
+  const shown = [], off = [];
+  spec.lims.forEach((L) => {
+    const near = L.ref || Math.abs(L.v) <= Math.max(dmax * 3, Math.abs(hi) + 0.25 * (hi - lo + 1e-6));
+    (near ? shown : off).push(L);
+  });
+  shown.forEach((L) => { lo = Math.min(lo, L.v); hi = Math.max(hi, L.v); });
+  if (lo >= 0 && spec.unit !== "mm") lo = 0;
+  const pad = (hi - lo || 1) * 0.08; hi += pad; if (lo < 0 || spec.unit === "mm") lo -= pad;
+  const d = S.duration || 1, x = (t) => m.l + (t / d) * (W - m.l - m.r), y = (v) => m.t + (1 - (v - lo) / (hi - lo)) * (H - m.t - m.b);
+  c.x = x; c.xinv = (e) => { const r = svg.getBoundingClientRect(); const px = (e.clientX - r.left) * (W / r.width); return Math.max(0, Math.min(d, ((px - m.l) / (W - m.l - m.r)) * d)); };
+  c.W = W;
+  const yt = niceTicks(lo, hi), xt = niceTicks(0, d, W < 420 ? 3 : 6);
+  let g = `<rect x="0" y="0" width="${W}" height="${H}" fill="transparent"/>`;
+  yt.forEach((v) => { g += `<line x1="${m.l}" x2="${W - m.r}" y1="${y(v)}" y2="${y(v)}" stroke="var(--grid)" stroke-width="1"/><text x="${m.l - 6}" y="${y(v) + 4}" text-anchor="end">${+v.toFixed(3)}</text>`; });
+  xt.forEach((v) => { g += `<text x="${x(v)}" y="${H - 6}" text-anchor="middle">${+v.toFixed(1)}s</text>`; });
+  g += `<line x1="${m.l}" x2="${W - m.r}" y1="${H - m.b}" y2="${H - m.b}" stroke="var(--axis)"/>`;
+  S.events.forEach((e) => { g += `<line x1="${x(e.t)}" x2="${x(e.t)}" y1="${m.t}" y2="${H - m.b}" stroke="var(--axis)" stroke-dasharray="2 3"/>`; });
+  // Limit/reference labels: right side first, then left, then step down, so none overlap.
+  const placed = { right: [], left: [] }, gapPx = 12;
+  const free = (side, yy) => placed[side].every((p) => Math.abs(p - yy) >= gapPx);
+  [...shown].sort((a, b) => y(a.v) - y(b.v)).forEach((L) => {
+    g += `<line x1="${m.l}" x2="${W - m.r}" y1="${y(L.v)}" y2="${y(L.v)}" stroke="${L.c}" stroke-width="${L.ref ? 1 : 1.5}" stroke-dasharray="${L.ref ? "1 3" : "6 4"}"/>`;
+    let ly = Math.max(m.t + 9, y(L.v) - 4), side = "right";
+    if (!free("right", ly)) side = free("left", ly) ? "left" : "right";
+    while (!free(side, ly)) ly += gapPx;
+    placed[side].push(ly);
+    const lx = side === "right" ? W - m.r - 2 : m.l + 4;
+    g += `<text class="lim-t" x="${lx}" y="${ly}" text-anchor="${side === "right" ? "end" : "start"}">${esc(L.name)} ${+L.v.toFixed(2)}</text>`;
+  });
+  g += `<clipPath id="cp${charts.indexOf(c)}"><rect x="${m.l}" y="${m.t}" width="${W - m.l - m.r}" height="${H - m.t - m.b}"/></clipPath>`;
+  let clipped = 0;
+  spec.series.forEach((s) => {
+    const pts = data.map((p) => { if (s.clip && p[s.k] > hi) clipped = Math.max(clipped, p[s.k]); return `${x(p.t).toFixed(1)},${y(Math.min(p[s.k], s.clip ? hi : p[s.k])).toFixed(1)}`; });
+    g += `<polyline clip-path="url(#cp${charts.indexOf(c)})" points="${pts.join(" ")}" fill="none" stroke="${s.c}" stroke-width="${s.thin ? 1 : 2}" stroke-linejoin="round" stroke-linecap="round"${s.thin ? ' opacity="0.8"' : ""}/>`;
+  });
+  g += `<line class="hx" x1="0" x2="0" y1="${m.t}" y2="${H - m.b}" stroke="var(--fg-2)" stroke-width="1" opacity="0"/>`;
+  g += `<line class="cur" x1="0" x2="0" y1="${m.t - 4}" y2="${H - m.b}" stroke="var(--fg)" stroke-width="2"/>`;
+  svg.setAttribute("viewBox", `0 0 ${W} ${H}`);
+  svg.innerHTML = g;
+  const notes = [];
+  if (off.length) notes.push(off.map((L) => `${L.name} ${+L.v.toFixed(2)} ${spec.unit}`).join(", ") + " (above the scale, not reached)");
+  if (clipped) notes.push(`raw peaks above the scale, highest ${clipped.toFixed(0)} N`);
+  c.off.textContent = notes.join(" · ");
+  c.off.hidden = !notes.length;
+  moveCursor(c);
+}
+function sampleAt(t) {
+  const a = S.samples; let lo = 0, hi = a.length - 1;
+  while (lo < hi) { const mid = (lo + hi + 1) >> 1; if (a[mid].t <= t) lo = mid; else hi = mid - 1; }
+  return a[lo];
+}
+function hover(c, e) {
+  const t = c.xinv(e), p = sampleAt(t), r = c.svg.getBoundingClientRect(), sx = r.width / c.W;
+  const hx = c.svg.querySelector(".hx"); hx.setAttribute("x1", c.x(p.t)); hx.setAttribute("x2", c.x(p.t)); hx.setAttribute("opacity", 1);
+  c.tip.innerHTML = `<div class="muted mono">t = ${fmt(p.t, 2)} s · ${esc(p.phase)}</div>` + c.spec.series.map((s) => `<div><i class="ln" style="display:inline-block;width:12px;border-top:2px solid ${s.c};margin-right:6px;vertical-align:middle"></i>${esc(s.name)} <b class="mono">${fmt(p[s.k], c.spec.d)} ${c.spec.unit}</b></div>`).join("");
+  c.tip.hidden = false;
+  const left = c.x(p.t) * sx + (c.svg.offsetLeft || 0);
+  const tw = c.tip.offsetWidth, cw = c.el.clientWidth;
+  c.tip.style.left = Math.min(Math.max(8, left + 12), cw - tw - 8) + "px";
+  c.tip.style.top = (c.svg.offsetTop + 8) + "px";
+}
+function moveCursor(c) {
+  const cur = c.svg.querySelector(".cur"); if (!cur || !c.x) return;
+  cur.setAttribute("x1", c.x(T)); cur.setAttribute("x2", c.x(T));
+}
+
+/* ---------- checks, events, pytest ---------- */
+function buildChecks() {
+  $("checks").innerHTML = `<thead><tr><th>Criterion</th><th>Measured</th><th>Required</th><th>Result</th></tr></thead><tbody>` +
+    S.checks.map((k) => `<tr><td>${esc(k.label)}</td><td class="num">${esc(k.measured)}</td><td class="num">${esc(k.limit)}</td><td>${k.limit === "informational" ? chip("info", "Info") : chip(k.pass ? "good" : "bad", k.pass ? "Pass" : "Fail")}</td></tr>`).join("") + "</tbody>";
+}
+function buildEvents() {
+  $("events").innerHTML = S.events.map((e) => {
+    const [ph, ...rest] = e.text.split(": ");
+    return `<li><button type="button" data-t="${e.t}"><span class="t">${fmt(e.t, 2)} s</span><span><span class="ph" style="color:var(--fg)">${esc(ph)}</span>${rest.length ? `<span class="muted"> · ${esc(rest.join(": "))}</span>` : ""}</span></button></li>`;
+  }).join("");
+  $("events").onclick = (ev) => { const b = ev.target.closest("button"); if (b) { T = +b.dataset.t + 0.01; playing = false; render(); } };
+}
+function buildPytest() {
+  if (!R.pytest) { $("pytest-box").hidden = true; return; }
+  const owner = {}; R.scenarios.forEach((s) => s.tests.forEach((t) => (owner[t] = s)));
+  $("pytest").innerHTML = `<thead><tr><th>Result</th><th>Test</th><th>What it checks</th><th>Time</th></tr></thead><tbody>` +
+    R.pytest.tests.map((t) => {
+      const s = owner[t.name];
+      const what = s ? `<button class="linkbtn" type="button" data-s="${s.id}">${esc(s.title)}</button> <span class="muted">· ${esc(s.expected)}</span>` : esc(R.static_tests[t.name] || "");
+      return `<tr><td>${chip(t.status === "passed" ? "good" : "bad", t.status === "passed" ? "Passed" : t.status)}</td><td class="num" style="white-space:normal">${esc(t.name)}</td><td>${what}</td><td class="num">${fmt(t.seconds, 1)} s</td></tr>`;
+    }).join("") + "</tbody>";
+  $("pytest").onclick = (e) => { const b = e.target.closest("[data-s]"); if (b) { location.hash = b.dataset.s; $("s-title").scrollIntoView({ behavior: "smooth", block: "start" }); } };
+}
+
+/* ---------- rendering ---------- */
+const ctx = { overview: $("cv-overview").getContext("2d"), robot: $("cv-robot").getContext("2d"), closeup: $("cv-closeup").getContext("2d") };
+function frameIndex(t) { const ts = S.sprites.times; let i = 0; while (i + 1 < ts.length && ts[i + 1] <= t + 1e-6) i++; return i; }
+async function drawFrames() {
+  const s = S, i = frameIndex(T);
+  for (const cam of ["overview", "robot", "closeup"]) {
+    const im = await loadImg(s.sprites.files[cam]); if (!im || S !== s) continue;
+    const [w, h] = s.sprites.size[cam], cols = s.sprites.cols, cv = ctx[cam].canvas;
+    ctx[cam].drawImage(im, (i % cols) * w, Math.floor(i / cols) * h, w, h, 0, 0, cv.width, cv.height);
+  }
+}
+function hud(p) {
+  const s = S, ph = PHASE[p.phase] || { color: "var(--muted)", action: p.phase };
+  $("h-dot").style.background = ph.color; $("h-state").textContent = p.phase;
+  $("h-action").textContent = ph.action;
+  let rows;
+  if (s.kind === "insertion") {
+    const a0 = s.samples[0].ax, prog = Math.max(0, Math.min(1, (p.ax - a0) / (s.limits.seat_mm - a0)));
+    $("h-prog").textContent = Math.round(prog * 100) + " %"; $("h-bar").style.width = prog * 100 + "%";
+    rows = [["Lateral offset", fmt(p.lat, 2) + " mm"], ["Along axis", fmt(p.ax, 1) + " mm"], ["Angle error", fmt(p.ang, 2) + "°"],
+      ["Contact force", fmt(p.f, 1) + " N"], ["Cable tension", fmt(p.ten, 1) + " N"], ["Boot load", fmt(p.sr, 1) + " N"]];
+  } else {
+    rows = [["Cable stretch", fmt(p.strain, 2) + " %"], ["Floor clearance", fmt(p.clr, 1) + " mm"], ["Cable tension", fmt(p.ten, 1) + " N"],
+      ["Boot load", fmt(p.sr, 1) + " N"], ["Fastest cable point", fmt(p.spd, 3) + " m/s"]];
+  }
+  $("h-vals").innerHTML = rows.map(([k, v]) => `<dt>${k}</dt><dd>${v}</dd>`).join("");
+}
+function render() {
+  if (!S) return;
+  const d = S.duration || 1; T = Math.max(0, Math.min(d, T));
+  $("time").textContent = `t = ${T.toFixed(1)} s / ${d.toFixed(1)} s`;
+  $("scrub").value = Math.round((T / d) * 1000);
+  $("cursor").style.left = `calc(${(T / d) * 100}% - 1px)`;
+  $("play").innerHTML = playing ? ICON.pause : ICON.play; $("play").setAttribute("aria-label", playing ? "Pause" : "Play");
+  hud(sampleAt(T)); charts.forEach(moveCursor); drawFrames();
+}
+function loop(ts) {
+  if (playing) {
+    const dt = lastTs ? (ts - lastTs) / 1000 : 0; T += dt * speed;
+    if (T >= S.duration) { T = S.duration; playing = false; }
+    render();
+  }
+  lastTs = ts; requestAnimationFrame(loop);
+}
+$("play").onclick = () => { if (!playing && T >= S.duration - 1e-6) T = 0; playing = !playing; render(); };
+$("scrub").oninput = (e) => { T = (e.target.value / 1000) * S.duration; playing = false; render(); };
+let rz; new ResizeObserver(() => { clearTimeout(rz); rz = setTimeout(() => charts.forEach(drawChart), 120); }).observe($("charts"));
+
+function route() { select(location.hash.slice(1) || R.scenarios[0].id); }
+window.addEventListener("hashchange", route);
+buildPytest(); route(); requestAnimationFrame(loop);
+</script>

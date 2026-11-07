@@ -323,7 +323,8 @@ def _add_connector(spec: mujoco.MjSpec, p: SceneParams, boot_offset: float) -> N
         rgba=[1, 0.5, 0, 1],
         group=4,
     )
-    conn.add_camera(name="connector_cam", pos=[0.05, 0, 0.0], xyaxes=[0, -1, 0, 1, 0, 0.0], fovy=70)
+    # Robot camera on top of the housing, looking along the insertion axis (+z), image-up = +x.
+    conn.add_camera(name="connector_cam", pos=[0.052, 0, 0.03], xyaxes=[0, 1, 0, 1, 0, 0], fovy=70)
 
 
 # --------------------------------------------------------------------------------------------
