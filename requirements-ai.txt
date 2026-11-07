@@ -1,0 +1,6 @@
+
+-r requirements.txt
+
+# Computer vision and charging-port detection
+opencv-python
+ultralytics

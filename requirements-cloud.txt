@@ -1,0 +1,4 @@
+-r requirements.txt
+
+# Optional cloud computing
+modal==1.6.3

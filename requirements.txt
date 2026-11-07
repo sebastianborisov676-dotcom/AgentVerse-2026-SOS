@@ -1,0 +1,9 @@
+
+# Physics simulation
+mujoco==4.0.0
+
+# Numerical calculations
+numpy>=2.0,<3.0
+
+# Testing
+pytest>=8.0,<10.0
