@@ -15,7 +15,7 @@ python scripts/run_autocharge.py                         # headless run + report
 python scripts/run_autocharge.py --viewer                # interactive MuJoCo viewer
 python scripts/run_autocharge.py --gif outputs/run.gif --csv outputs/telemetry.csv
 python scripts/run_autocharge.py --perception-error-mm 6 # simulate a bad socket estimate
-python -m pytest tests                                   # 13 validation tests (~2 min)
+python -m pytest tests                                   # 15 validation tests (~3 min)
 ```
 
 ## Code layout
@@ -81,7 +81,7 @@ box segments plus a floor, 45 mm deep, radial clearance 2.0 mm (AC) / 1.5 mm (DC
   perception will supply it later. All alignment decisions use the estimate, so perception error
   behaves as it would on hardware.
 
-## Validation results (all measured, `pytest tests`: 13 passed)
+## Validation results (all measured, `pytest tests`: 15 passed)
 
 | Check | Result |
 |---|---|
@@ -135,6 +135,39 @@ insertion; force, tension, deflection and e-stop safety responses; retry/abort l
     `--perception-error-mm` is a stand-in.
 11. **Start-up settling.** The cable is released from a routed pose; `reset_to_home` holds 0.5 s so
     a ~20 N numerical tension transient settles before the controller arms its limits.
+
+## Drive-in mission (robot starts 3 m away)
+
+`python scripts/run_autocharge.py --drive-in --viewer`
+
+The robot starts **3.04 m** from its docking spot, 0.5 m to the side and turned 15°, already
+plugged into the charger with a **4.55 m** cable (64 segments). `ChargingMission`
+(`src/autocharge/mission.py`) runs it in two stages:
+
+1. **Drive and dock** (`src/autocharge/base_controller.py`): pure-pursuit along a smooth Bezier
+   path at up to 0.35 m/s with acceleration limits, then a slow final correction until the base is
+   within **1 cm and 0.5°** for 0.4 s. Brakes then hold the base. While driving, the arm holds its
+   carry pose with an integral joint loop so the cable's drag does not push the connector around,
+   and the drive stops if cable tension or boot load passes its limit.
+2. **Align and insert**: the same alignment-gated insertion controller as before, started only
+   after the base is parked.
+
+Measured (test `test_drive_in_from_3m_docks_aligns_and_seats`): drove 3.12 m, parked 7.6 mm /
+0.17° from target at t ≈ 11 s, aligned to 0.93 mm / 0.04°, seated at t ≈ 30 s; cable tension
+≤ 12 N, boot load ≤ 14.5 N, cable end never more than 3 mm from the strain relief, base never
+drove over the cable, no solver warnings. `test_drive_stops_when_cable_pulls_too_hard` shows the
+base stops and brakes when the cable tension limit is hit, and the arm never starts.
+
+Approximations specific to driving:
+
+* **The base is not wheel-driven.** The Menagerie model has no wheel joints, so the scene gives the
+  base planar x / y / yaw joints with velocity servos at load time (robot file untouched). The
+  controller only commands forward speed and turn rate (differential-drive kinematics), but there
+  is no wheel–floor contact, slip or rolling resistance: base–floor collision is switched off.
+* **Brakes** are a stiff position hold through the same servos.
+* **Docking uses the true base pose** (perfect odometry/localisation). Real docking would use
+  wheel odometry plus a camera or fiducial on the charging bay.
+* The 140 kg base mass comes from the robot model's mesh density, not a datasheet.
 
 ## Next step: camera-based autonomy
 

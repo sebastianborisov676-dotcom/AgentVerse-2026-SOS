@@ -41,6 +41,9 @@ ARM_JOINTS = (
     "joint_gripper",
 )
 FINGER_JOINTS = ("joint_finger_right", "joint_finger_left")
+# Optional planar mobile base (added at load time; the Menagerie model has no wheel joints).
+BASE_JOINTS = ("base_x", "base_y", "base_yaw")
+BASE_ACTUATORS = ("base_x_vel", "base_y_vel", "base_yaw_vel")
 
 # Collision bitmasks. Robot meshes, floor and cable use the MuJoCo default (1/1).
 # The connector uses bit 2 only, so it never collides with the gripper it is mounted in or with
@@ -88,6 +91,11 @@ class SceneParams:
     # Connector mass (kg). Real CCS2 handles are ~0.8-1.2 kg.
     connector_mass: float = 0.9
     timestep: float = 0.002
+    # Mobile base: when True the robot base gets planar x / y / yaw joints driven by velocity
+    # servos, and starts at ``base_start`` (x m, y m, yaw deg). The docking pose is the origin,
+    # where the arm's home pose was solved.
+    mobile_base: bool = False
+    base_start: tuple[float, float, float] = (0.0, 0.0, 0.0)
 
 
 @dataclasses.dataclass
@@ -488,6 +496,68 @@ def route_cable(
 # --------------------------------------------------------------------------------------------
 
 
+def _make_mobile(spec: mujoco.MjSpec) -> None:
+    """Give the robot base planar joints + velocity servos (unicycle-style drive is commanded by
+    the drive controller). The robot XML file is untouched; this edits the in-memory spec only."""
+    base = spec.body("base_link")
+    for name, jtype, axis in (
+        ("base_x", mujoco.mjtJoint.mjJNT_SLIDE, [1, 0, 0]),
+        ("base_y", mujoco.mjtJoint.mjJNT_SLIDE, [0, 1, 0]),
+        ("base_yaw", mujoco.mjtJoint.mjJNT_HINGE, [0, 0, 1]),
+    ):
+        j = base.add_joint(name=name, type=jtype, axis=axis)
+        j.damping = [0.0, 0.0, 0.0]
+        j.frictionloss, j.armature = 0.0, 0.0
+    for name, joint, kv, frc in (
+        ("base_x_vel", "base_x", 3000.0, 800.0),
+        ("base_y_vel", "base_y", 3000.0, 800.0),
+        ("base_yaw_vel", "base_yaw", 400.0, 300.0),
+    ):
+        a = spec.add_actuator(name=name, target=joint, trntype=mujoco.mjtTrn.mjTRN_JOINT)
+        a.gainprm[0] = kv
+        a.biastype = mujoco.mjtBias.mjBIAS_AFFINE
+        a.biasprm[2] = -kv
+        a.ctrlrange = [-1.0, 1.0]
+        a.forcerange = [-frc, frc]
+        a.ctrllimited = mujoco.mjtLimited.mjLIMITED_TRUE
+        a.forcelimited = mujoco.mjtLimited.mjLIMITED_TRUE
+    # The base rides on the floor kinematically (no wheel-floor contact dynamics).
+    spec.add_exclude(bodyname1="world", bodyname2="base_link")
+
+
+def route_cable_mobile(
+    p: SceneParams, anchor: np.ndarray, sr_pos: np.ndarray, exit_dir: np.ndarray
+) -> tuple[np.ndarray, float]:
+    """Initial route for a distant robot: out of the outlet, along the floor to the robot's
+    right-hand side (clear of its drive path), then up into the boot."""
+    r = p.cable_radius + 0.0005
+    out_dir = np.array([0.0, -1.0, 0.0])
+    ctrl = np.array(
+        [
+            anchor,
+            anchor + out_dir * 0.26,
+            anchor + out_dir * 0.40 + np.array([0, 0, -0.25]),
+            np.array([anchor[0] + 0.05, anchor[1] - 0.40, r]),
+            np.array([0.5 * (anchor[0] + sr_pos[0]), anchor[1] - 0.45, r]),
+            np.array([sr_pos[0] + 0.10, sr_pos[1] - 0.60, r]),
+            sr_pos + exit_dir * 0.35,
+            sr_pos,
+        ]
+    )
+    pts, seg = _resample(_chaikin(ctrl, 3), p.cable_segments)
+    pts[0] = anchor
+    pts[1] = anchor + out_dir * seg
+    pts[-1] = sr_pos
+    pts[-2] = sr_pos + exit_dir * seg
+    return pts, seg
+
+
+def _set_base(model, qpos, pose) -> None:
+    x, y, yaw_deg = pose
+    for name, v in zip(BASE_JOINTS, (x, y, math.radians(yaw_deg)), strict=True):
+        qpos[model.jnt_qposadr[model.joint(name).id]] = v
+
+
 def _home_ik(model, data, p: SceneParams):
     rot = socket_rotation()
     target = np.array(p.socket_pos) - rot[:, 2] * p.home_standoff
@@ -517,21 +587,28 @@ def build_model(params: SceneParams | None = None) -> tuple[mujoco.MjModel, Scen
     # Pass 1: no cable, solve the home pose and locate the strain relief.
     spec0 = mujoco.MjSpec.from_string(_scene_xml(p, None))
     _add_connector(spec0, p, boot_offset=0.06)
+    if p.mobile_base:
+        _make_mobile(spec0)
     m0 = spec0.compile()
     d0 = mujoco.MjData(m0)
-    q_home, ik_pe, ik_re = _home_ik(m0, d0, p)
+    q_home, ik_pe, ik_re = _home_ik(m0, d0, p)  # solved with the base at the docking pose
     qadr, _ = arm_dof_indices(m0)
     d0.qpos[qadr] = q_home
+    if p.mobile_base:
+        _set_base(m0, d0.qpos, p.base_start)
     mujoco.mj_kinematics(m0, d0)
     anchor = d0.site_xpos[m0.site("cable_anchor").id].copy()
     sr_pos = d0.site_xpos[m0.site("strain_relief").id].copy()
     conn_rot = d0.xmat[m0.body("connector").id].reshape(3, 3)
     exit_world = conn_rot @ STRAIN_RELIEF_EXIT
-    route, seg = route_cable(p, anchor, sr_pos, exit_world)
+    router = route_cable_mobile if p.mobile_base else route_cable
+    route, seg = router(p, anchor, sr_pos, exit_world)
 
     # Pass 2: full scene with cable, attachment constraints and home keyframe.
     spec = mujoco.MjSpec.from_string(_scene_xml(p, seg))
     _add_connector(spec, p, boot_offset=seg)
+    if p.mobile_base:
+        _make_mobile(spec)
     n = p.cable_segments
     last, second_last = spec.body(f"cable_{n}"), spec.body(f"cable_{n - 1}")
     last.add_site(name="cable_end", size=[0.004, 0, 0], group=4)
@@ -558,6 +635,8 @@ def build_model(params: SceneParams | None = None) -> tuple[mujoco.MjModel, Scen
     qpos[qadr] = q_home
     for fj in FINGER_JOINTS:
         qpos[model.jnt_qposadr[model.joint(fj).id]] = 0.6
+    if p.mobile_base:
+        _set_base(model, qpos, p.base_start)
     outlet_id = model.body("cable_outlet").id
     mujoco.mj_kinematics(model, data)
     outlet_pos = data.xpos[outlet_id].copy()
@@ -571,6 +650,8 @@ def build_model(params: SceneParams | None = None) -> tuple[mujoco.MjModel, Scen
                 qpos[model.jnt_qposadr[j]] = float(model.jnt_axis[j] @ disp_local)
     ctrl = np.zeros(model.nu)
     for a in range(model.nu):
+        if mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_ACTUATOR, a) in BASE_ACTUATORS:
+            continue  # velocity servos: hold still
         jid = model.actuator_trnid[a, 0]
         ctrl[a] = qpos[model.jnt_qposadr[jid]]
     spec.add_key(name="home", qpos=qpos.tolist(), ctrl=ctrl.tolist())

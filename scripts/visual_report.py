@@ -39,6 +39,8 @@ from autocharge import (
     plug_alignment_error,
     reset_to_home,
 )
+from autocharge.base_controller import DriveLimits, DrivePhase
+from autocharge.mission import DRIVE_IN_PARAMS, ChargingMission
 from autocharge.scene import ARM_JOINTS, PIN_LENGTH
 
 FRAME_HZ = 4.0
@@ -56,16 +58,31 @@ CAMERAS = {
 class Scenario:
     id: str
     title: str
-    kind: str  # insertion | hold | swing
+    kind: str  # insertion | hold | swing | mission
     question: str  # what the test proves
     expected: str
     offset_mm: float = 0.0
     limits: dict | None = None
     estop: bool = False
+    drive_limits: dict | None = None
     tests: tuple[str, ...] = ()
 
 
 SCENARIOS = [
+    Scenario(
+        "drive-in", "Drive in from 3 m, dock, align, plug in", "mission",
+        "Starting 3 m away, 0.5 m to the side and turned 15 degrees, can the robot drive to the car, "
+        "park accurately, then align and seat the connector with the cable attached the whole way?",
+        "Docked within 1 cm / 0.5 deg, then seated",
+        tests=("test_drive_in_from_3m_docks_aligns_and_seats",),
+    ),
+    Scenario(
+        "drive-cable-stop", "Drive stops on cable over-tension", "mission",
+        "If the cable pulls too hard while the robot is driving, does the base stop and brake?",
+        "Base stops when tension passes 6 N (limit lowered for the test), arm never starts",
+        drive_limits={"cable_tension_max": 6.0},
+        tests=("test_drive_stops_when_cable_pulls_too_hard",),
+    ),
     Scenario(
         "nominal", "Nominal insertion", "insertion",
         "Does the robot align, insert slowly and seat the connector without touching the socket walls?",
@@ -147,8 +164,15 @@ def _warnings(data) -> dict[str, int]:
 
 
 class Recorder:
-    def __init__(self, model):
+    def __init__(self, model, overview: dict | None = None):
         self.m = model
+        self.overview = None
+        if overview:
+            self.overview = mujoco.MjvCamera()
+            self.overview.lookat[:] = overview["lookat"]
+            self.overview.distance = overview["distance"]
+            self.overview.azimuth = overview["azimuth"]
+            self.overview.elevation = overview["elevation"]
         self.renderers = {k: mujoco.Renderer(model, h, w) for k, (w, h) in CAMERAS.items()}
         self.close_cam = mujoco.MjvCamera()
         self.frames: dict[str, list[np.ndarray]] = {k: [] for k in CAMERAS}
@@ -164,7 +188,7 @@ class Recorder:
         self.close_cam.distance, self.close_cam.azimuth, self.close_cam.elevation = 0.42, 90, -8
         for k, r in self.renderers.items():
             if k == "overview":
-                r.update_scene(data, camera="overview")
+                r.update_scene(data, self.overview if self.overview is not None else "overview")
             elif k == "robot":
                 r.update_scene(data, camera="connector_cam")
             else:
@@ -172,7 +196,7 @@ class Recorder:
             self.frames[k].append(r.render().copy())
         self.frame_t.append(round(float(data.time), 3))
 
-    def tick(self, data, phase: str, force_filt: float = 0.0):
+    def tick(self, data, phase: str, force_filt: float = 0.0, extra: dict | None = None):
         cf = connector_contact_force(self.m, data)
         self._raw_max = max(self._raw_max, cf.total_normal)
         if data.time + 1e-9 >= self._next_sample:
@@ -192,6 +216,7 @@ class Recorder:
                     "strain": round(cab.max_edge_strain * 100, 3),
                     "clr": round(cab.min_clearance * 1e3, 2),
                     "spd": round(cab.max_speed, 3),
+                    **(extra or {}),
                 }
             )
             self._raw_max = 0.0
@@ -419,6 +444,102 @@ def run_passive(model, info, sc: Scenario) -> tuple[Recorder, dict, list, list]:
     return rec, summary, checks, events
 
 
+MISSION_CAMERA = {"lookat": [-1.25, -0.25, 0.45], "distance": 4.9, "azimuth": 90.0, "elevation": -24.0}
+
+
+def run_mission(model, sc: Scenario) -> tuple[Recorder, dict, list, list]:
+    data = mujoco.MjData(model)
+    reset_to_home(model, data)
+    dlim = dataclasses.replace(DriveLimits(), **(sc.drive_limits or {}))
+    ms = ChargingMission(model, data, drive_limits=dlim)
+    rec = Recorder(model, overview=MISSION_CAMERA)
+    start_dist, _, _ = ms.drive.errors(data)
+    end_site, sr_site = model.site("cable_end").id, model.site("strain_relief").id
+    base_id = model.body("base_link").id
+    max_gap = peak_t = peak_sr = 0.0
+    base_cable = 0
+    dock_err = None
+
+    def extra():
+        dist, lat, yerr = ms.drive.errors(data)
+        return {"bdist": round(dist, 4), "blat": round(lat * 1e3, 2), "byaw": round(math.degrees(yerr), 3),
+                "bspd": round(abs(ms.drive.v), 3)}
+
+    def force():
+        return ms.insertion.force_filt if ms.insertion is not None else 0.0
+
+    rec.tick(data, ms.phase, 0.0, extra())
+    step = 0
+    while not ms.done and data.time < 70.0:
+        ms.step(data)
+        mujoco.mj_step(model, data)
+        if not np.isfinite(data.qpos).all():
+            raise RuntimeError(f"{sc.id}: diverged at t={data.time:.3f}")
+        step += 1
+        if dock_err is None and ms.drive.phase == DrivePhase.DOCKED:
+            dock_err = ms.drive.errors(data)
+        if step % 25 == 0:
+            max_gap = max(max_gap, float(np.linalg.norm(data.site_xpos[end_site] - data.site_xpos[sr_site])))
+            c = cable_metrics(model, data)
+            peak_t, peak_sr = max(peak_t, c.max_tension), max(peak_sr, c.strain_relief_load)
+            for j in range(data.ncon):
+                con = data.contact[j]
+                if (con.flex[0] >= 0) != (con.flex[1] >= 0):
+                    g = con.geom[1] if con.flex[0] >= 0 else con.geom[0]
+                    if g >= 0 and model.geom_bodyid[g] == base_id:
+                        base_cable += 1
+        rec.tick(data, ms.phase, force(), extra())
+    stop_xy = np.array(ms.drive.pose(data)[:2])
+    end = data.time + 1.0
+    while data.time < end:
+        ms.step(data)
+        mujoco.mj_step(model, data)
+        rec.tick(data, ms.phase, force(), extra())
+    rec._render(data)
+
+    events = sorted(({"t": t, "text": e} for t, e in ms.events), key=lambda e: e["t"])
+    stops = [e["text"] for e in events if e["text"].startswith("stopped")]
+    checks = [check("Start distance to docking pose", start_dist, ">=", 3.0, "m")]
+    if sc.id == "drive-in":
+        al = plug_alignment_error(model, data)
+        dd, _, dy = dock_err if dock_err else (float("nan"), 0.0, float("nan"))
+        checks += [
+            check("Distance driven", ms.drive.travelled, ">=", 3.0, "m"),
+            check("Parking position error", dd * 100, "<", 1.2, "cm"),
+            check("Parking heading error", abs(math.degrees(dy)), "<", 0.6, "deg"),
+            flag("Final state", ms.phase == "seated", ms.phase, "seated"),
+            check("Final plug lateral error", al.lateral * 1e3, "<", 1.5, "mm"),
+            check("Final plug angle error", math.degrees(al.angle), "<", 1.0, "deg"),
+            check("Cable end to strain relief, worst gap", max_gap * 1e3, "<", 3.0, "mm"),
+            check("Peak cable tension", peak_t, "<", 60.0, "N", ".1f"),
+            check("Peak strain-relief load", peak_sr, "<", 45.0, "N", ".1f"),
+            flag("Base drove over the cable", base_cable == 0, f"{base_cable} contact samples", "0"),
+        ]
+    else:
+        moved = float(np.linalg.norm(np.array(ms.drive.pose(data)[:2]) - stop_xy))
+        checks += [
+            flag("Stop reason", any("cable tension" in r for r in stops), stops[0] if stops else "none",
+                 "cable tension > 6 N"),
+            flag("Arm insertion started", ms.insertion is None, "no" if ms.insertion is None else "yes", "no"),
+            check("Base movement 1 s after stopping", moved * 1e3, "<", 10.0, "mm", ".1f"),
+        ]
+    checks.append(flag("No simulator warnings", not _warnings(data), str(_warnings(data) or "none"), "none"))
+    if ms.phase == "seated":
+        outcome = "seated"
+    elif ms.drive.phase == DrivePhase.STOPPED:
+        outcome = "stopped"
+    else:
+        outcome = ms.phase
+    summary = {
+        "outcome": outcome,
+        "retries": ms.insertion.retries if ms.insertion else 0,
+        "peaks": {"cable_tension": round(peak_t, 2), "strain_relief": round(peak_sr, 2),
+                  "contact_force": round(ms.insertion.peak["contact_force"], 2) if ms.insertion else 0.0},
+        "start_dist_m": round(start_dist, 3),
+    }
+    return rec, summary, checks, events
+
+
 def run_pytest(out_dir: pathlib.Path) -> dict:
     xml_path = out_dir / "junit.xml"
     t = time.time()
@@ -454,6 +575,7 @@ def main() -> int:
         return 0
 
     model, info = build_model()
+    mobile_model = None
     lim = InsertionLimits()
     report = {
         "generated": datetime.datetime.now().strftime("%Y-%m-%d %H:%M"),
@@ -482,7 +604,12 @@ def main() -> int:
     }
     for sc in SCENARIOS:
         t = time.time()
-        if sc.kind == "insertion":
+        if sc.kind == "mission":
+            if mobile_model is None:
+                mobile_model, mobile_info = build_model(DRIVE_IN_PARAMS)
+                report["scene"]["drive_in_cable_m"] = round(mobile_info.cable_length, 2)
+            rec, summary, checks, events = run_mission(mobile_model, sc)
+        elif sc.kind == "insertion":
             rec, summary, checks, events = run_insertion(model, sc)
         else:
             rec, summary, checks, events = run_passive(model, info, sc)

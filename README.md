@@ -117,6 +117,8 @@ python -m pytest tests/
 ```bash
 python scripts/run_autocharge.py            # headless run with a report
 python scripts/run_autocharge.py --viewer   # interactive viewer
+python scripts/run_autocharge.py --drive-in --viewer   # start 3 m away, drive, dock, plug in
+python scripts/visual_report.py             # replay every test into outputs/test_report/index.html
 ```
 
 On Windows Git Bash, activate the environment with `source .venv/Scripts/activate`.

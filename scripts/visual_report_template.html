@@ -1,3 +1,4 @@
+<meta charset="utf-8">
 <title>AutoCharge Test Bench</title>
 <meta name="claude:viewport-fit-sides" content="cover">
 <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -33,6 +34,8 @@
   --ph-align: #3987e5;
   --ph-insert: #1c5cab;
   --ph-hold: #3987e5;
+  --ph-drive: #199e70;
+  --ph-dock: #9085e9;
   --stage: #0a0f14;
   --font-display: "Barlow Semi Condensed", "Arial Narrow", system-ui, sans-serif;
   --font-body: "IBM Plex Sans", system-ui, -apple-system, "Segoe UI", sans-serif;
@@ -49,7 +52,7 @@
     --grid: #e1e6ec; --axis: #c3cbd4;
     --s1: #2a78d6; --s2: #eb6834; --raw: #9aa4ae;
     --good-ink: #006300; --critical-ink: #b42b2b;
-    --ph-approach: #9ec5f4; --ph-align: #3987e5; --ph-insert: #1c5cab; --ph-hold: #3987e5;
+    --ph-approach: #9ec5f4; --ph-align: #3987e5; --ph-insert: #1c5cab; --ph-hold: #3987e5; --ph-drive: #1baf7a; --ph-dock: #6250d6;
     --stage: #dfe5ec;
   }
 }
@@ -62,11 +65,12 @@
   --grid: #e1e6ec; --axis: #c3cbd4;
   --s1: #2a78d6; --s2: #eb6834; --raw: #9aa4ae;
   --good-ink: #006300; --critical-ink: #b42b2b;
-  --ph-approach: #9ec5f4; --ph-align: #3987e5; --ph-insert: #1c5cab; --ph-hold: #3987e5;
+  --ph-approach: #9ec5f4; --ph-align: #3987e5; --ph-insert: #1c5cab; --ph-hold: #3987e5; --ph-drive: #1baf7a; --ph-dock: #6250d6;
   --stage: #dfe5ec;
 }
 
 * { box-sizing: border-box; }
+[hidden] { display: none !important; }
 body {
   background: var(--bg); color: var(--fg);
   font: 14px/1.5 var(--font-body);
@@ -252,7 +256,7 @@ code { font-family: var(--font-mono); font-size: 12.5px; background: var(--panel
               <dt>Action</dt><dd id="h-action" style="font-family:var(--font-body)"></dd>
             </dl>
             <div id="h-prog-wrap" style="display:grid;gap:4px">
-              <div style="display:flex;justify-content:space-between;font-size:12px"><span class="muted">Distance to seated</span><span class="mono" id="h-prog"></span></div>
+              <div style="display:flex;justify-content:space-between;font-size:12px"><span class="muted">Mission progress</span><span class="mono" id="h-prog"></span></div>
               <div class="bar"><i id="h-bar"></i></div>
             </div>
             <div class="sep"></div>
@@ -330,9 +334,13 @@ const PHASE = {
   aborted: { color: "var(--critical)", action: "Stopped at standoff, retries used up" },
   estop: { color: "var(--critical)", action: "Emergency stop: holding position" },
   holding: { color: "var(--ph-hold)", action: "Holding the home pose" },
+  drive: { color: "var(--ph-drive)", action: "Driving to the docking spot" },
+  dock: { color: "var(--ph-dock)", action: "Fine docking (slow final correction)" },
+  docked: { color: "var(--ph-dock)", action: "Parked, brakes on" },
+  stopped: { color: "var(--critical)", action: "Stopped: brakes on, arm not started" },
   swinging: { color: "var(--ph-hold)", action: "Swinging the arm through waypoints" },
 };
-const OUTCOME = { seated: "Seated", aborted: "Aborted safely", estop: "Emergency stop held", stable: "Stable", unstable: "Unstable" };
+const OUTCOME = { seated: "Seated", aborted: "Aborted safely", estop: "Emergency stop held", stable: "Stable", unstable: "Unstable", stopped: "Stopped safely" };
 const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
 const chip = (kind, text) => `<span class="chip ${kind}">${ICON[kind === "good" ? "ok" : kind === "bad" ? "bad" : "info"]}${esc(text)}</span>`;
 const fmt = (v, d = 1) => (v === undefined || v === null || Number.isNaN(v) ? "–" : Number(v).toFixed(d));
@@ -340,7 +348,7 @@ const fmt = (v, d = 1) => (v === undefined || v === null || Number.isNaN(v) ? "�
 /* ---------- header + summary ---------- */
 $("meta").innerHTML = [
   ["MuJoCo", R.mujoco], ["Commit", R.commit || "–"], ["Generated", R.generated],
-  ["Cable", `${R.scene.cable_length_m} m, ${R.scene.segments} segments`],
+  ["Cable", `${R.scene.cable_length_m} m${R.scene.drive_in_cable_m ? `, drive-in ${R.scene.drive_in_cable_m} m` : ""}`],
 ].map(([k, v]) => `<span>${k} <b class="mono">${esc(v)}</b></span>`).join("");
 
 const scPass = R.scenarios.filter((s) => s.passed).length;
@@ -392,8 +400,8 @@ function select(id) {
     chip("info", "Result: " + (OUTCOME[s.summary.outcome] || s.summary.outcome)),
     `<span class="muted" style="font-size:13px">Expected: ${esc(s.expected)}</span>`,
   ].join("");
-  $("h-mode").textContent = s.kind === "insertion" ? "Autonomous insertion" : s.kind === "swing" ? "Scripted arm motion" : "Servo hold, no controller";
-  $("h-prog-wrap").hidden = s.kind !== "insertion";
+  $("h-mode").textContent = { insertion: "Autonomous insertion", mission: "Autonomous drive + insertion", swing: "Scripted arm motion" }[s.kind] || "Servo hold, no controller";
+  $("h-prog-wrap").hidden = !(s.kind === "insertion" || s.kind === "mission");
   buildStrip(); buildCharts(); buildChecks(); buildEvents();
   $("loading").hidden = false;
   Promise.all(["overview", "robot", "closeup"].map((c) => loadImg(s.sprites.files[c]))).then(() => { if (S === s) { $("loading").hidden = true; render(); } });
@@ -437,6 +445,20 @@ function chartSpecs(s) {
       series: [{ k: "ten", name: "max tension along cable", c: "var(--s1)" }, { k: "sr", name: "load on connector boot", c: "var(--s2)" }],
       lims: [{ v: L.tension_max, name: "tension limit", c: "var(--critical)" }, { v: L.strain_relief_max, name: "boot limit", c: "var(--serious)" }] },
   ];
+  if (s.kind === "mission") return [
+    { title: "Base distance to the docking spot", unit: "m", d: 3, series: [{ k: "bdist", name: "distance", c: "var(--ph-drive)" }],
+      lims: [{ v: 0.01, name: "docking tolerance", c: "var(--good)", ref: true }] },
+    { title: "Plug offset from the socket axis", unit: "mm", d: 2, ymax: 8, series: [{ k: "lat", name: "lateral offset", c: "var(--s1)", clip: true }],
+      lims: [{ v: L.align_lateral_mm, name: "alignment gate", c: "var(--warning)" }, { v: L.insert_lateral_max_mm, name: "abort", c: "var(--critical)" }],
+      note: "zoomed to 0–8 mm; far larger while driving" },
+    { title: "Contact force, connector on socket", unit: "N", d: 1,
+      series: [{ k: "fr", name: "raw solver peak (0.1 s)", c: "var(--raw)", thin: true, clip: true }, { k: "f", name: "filtered (controller input)", c: "var(--s1)" }],
+      lims: [{ v: L.force_soft, name: "pause", c: "var(--warning)" }, { v: L.force_max, name: "retract", c: "var(--critical)" }] },
+    { title: "Cable load", unit: "N", d: 1,
+      series: [{ k: "ten", name: "max tension along cable", c: "var(--s1)" }, { k: "sr", name: "load on connector boot", c: "var(--s2)" }],
+      lims: s.id === "drive-cable-stop" ? [{ v: 6, name: "drive stop limit (lowered)", c: "var(--critical)" }]
+        : [{ v: L.tension_max, name: "tension limit", c: "var(--critical)" }, { v: L.strain_relief_max, name: "boot limit", c: "var(--serious)" }] },
+  ];
   const hold = s.kind === "hold";
   return [
     { title: "Cable stretch (largest edge)", unit: "%", d: 2, series: [{ k: "strain", name: "stretch", c: "var(--s1)" }],
@@ -477,7 +499,8 @@ function drawChart(c) {
   const { spec, svg } = c, data = S.samples, W = Math.max(260, svg.clientWidth || 520), H = 190;
   const m = { l: 48, r: 14, t: 10, b: 24 };
   const vals = []; spec.series.forEach((s) => { if (!s.clip) data.forEach((p) => vals.push(p[s.k])); });
-  let lo = Math.min(...vals), hi = Math.max(...vals);
+  let lo = vals.length ? Math.min(...vals) : 0, hi = vals.length ? Math.max(...vals) : (spec.ymax ?? 1);
+  if (spec.ymax !== undefined) { lo = 0; hi = spec.ymax; }
   const dmax = Math.max(Math.abs(lo), Math.abs(hi), 1e-6);
   const shown = [], off = [];
   spec.lims.forEach((L) => {
@@ -520,7 +543,7 @@ function drawChart(c) {
   svg.innerHTML = g;
   const notes = [];
   if (off.length) notes.push(off.map((L) => `${L.name} ${+L.v.toFixed(2)} ${spec.unit}`).join(", ") + " (above the scale, not reached)");
-  if (clipped) notes.push(`raw peaks above the scale, highest ${clipped.toFixed(0)} N`);
+  if (clipped) notes.push(`values above the scale, highest ${clipped.toFixed(clipped > 100 ? 0 : 1)} ${spec.unit}`);
   c.off.textContent = notes.join(" · ");
   c.off.hidden = !notes.length;
   moveCursor(c);
@@ -585,7 +608,15 @@ function hud(p) {
   $("h-dot").style.background = ph.color; $("h-state").textContent = p.phase;
   $("h-action").textContent = ph.action;
   let rows;
-  if (s.kind === "insertion") {
+  if (s.kind === "mission") {
+    const d0 = s.samples[0].bdist, firstArm = s.samples.find((q) => !["drive", "dock", "docked", "stopped"].includes(q.phase));
+    let prog;
+    if (!firstArm || p.t < firstArm.t) prog = 0.5 * Math.max(0, Math.min(1, 1 - p.bdist / d0));
+    else prog = 0.5 + 0.5 * Math.max(0, Math.min(1, (p.ax - firstArm.ax) / (s.limits.seat_mm - firstArm.ax)));
+    $("h-prog").textContent = Math.round(prog * 100) + " %"; $("h-bar").style.width = prog * 100 + "%";
+    rows = [["Base to dock", fmt(p.bdist * 100, 1) + " cm"], ["Base heading error", fmt(p.byaw, 2) + "°"], ["Base speed", fmt(p.bspd, 2) + " m/s"],
+      ["Plug lateral offset", fmt(p.lat, 1) + " mm"], ["Contact force", fmt(p.f, 1) + " N"], ["Cable tension", fmt(p.ten, 1) + " N"], ["Boot load", fmt(p.sr, 1) + " N"]];
+  } else if (s.kind === "insertion") {
     const a0 = s.samples[0].ax, prog = Math.max(0, Math.min(1, (p.ax - a0) / (s.limits.seat_mm - a0)));
     $("h-prog").textContent = Math.round(prog * 100) + " %"; $("h-bar").style.width = prog * 100 + "%";
     rows = [["Lateral offset", fmt(p.lat, 2) + " mm"], ["Along axis", fmt(p.ax, 1) + " mm"], ["Angle error", fmt(p.ang, 2) + "°"],
