@@ -117,6 +117,8 @@ python -m pytest tests/
 ```bash
 python scripts/run_autocharge.py            # headless run with a report
 python scripts/run_autocharge.py --viewer   # interactive viewer
+python scripts/autonomy_demo.py             # camera-driven autonomy; arrow keys push the car live
+python scripts/autonomy_demo.py --record outputs/demo.mp4 --move-at 3 --seed 11   # headless video
 python scripts/run_autocharge.py --drive-in --viewer   # start 3 m away, drive, dock, plug in
 python scripts/visual_report.py             # replay every test into outputs/test_report/index.html
 ```

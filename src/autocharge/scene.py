@@ -63,6 +63,17 @@ STRAIN_RELIEF_EXIT = np.array([-1.0, 0.0, 0.0])  # cable leaves the boot along c
 
 # Socket geometry (socket frame, same convention as connector).
 CAVITY_DEPTH = 0.045
+
+# Fiducial marker on the car body beside the inlet (like a printed target on the charging flap
+# surround). The robot's camera detects it; the fixed marker-to-socket transform below is the
+# inlet's known geometry, not the car's pose. ArUco DICT_4X4_50, id 7.
+MARKER_ID = 7
+MARKER_SIZE = 0.070  # m, black square edge
+MARKER_PIX = 200  # texture pixels across the black square
+MARKER_PAD = 40  # white quiet-zone pixels on each side
+# Marker frame (OpenCV convention: x right, y up, z out towards the viewer) in the socket frame.
+MARKER_POS_S = np.array([0.140, 0.0, CAVITY_DEPTH + 0.0145])
+MARKER_ROT_S = np.array([[0.0, 1.0, 0.0], [1.0, 0.0, 0.0], [0.0, 0.0, -1.0]]).T  # columns x_m, y_m, z_m
 RING_WALL = 0.004
 RING_SEGMENTS = 16
 
@@ -166,19 +177,21 @@ def _socket_xml(p: SceneParams) -> str:
     sx, sy, _ = p.socket_pos
     car_face_x = sx + CAVITY_DEPTH + 0.015
     return f"""
-    <body name="vehicle" pos="0 0 0">
+    <body name="vehicle" pos="0 0 0" mocap="true">
       <geom name="car_body" class="vehicle" type="box" pos="{car_face_x + 0.9:.6g} {sy + 0.2:.6g} 0.75"
             size="0.9 1.0 0.43" rgba="0.62 0.05 0.06 1"/>
       <geom name="car_wheel" type="cylinder" pos="{car_face_x + 0.45:.6g} {sy - 0.55:.6g} 0.32"
             size="0.32 0.11" quat="0.7071 0.7071 0 0" rgba="0.08 0.08 0.08 1" contype="0" conaffinity="0"/>
       <body name="socket" pos="{_fmt(p.socket_pos)}" quat="{_fmt(quat)}">
         <site name="socket_face" pos="0 0 0" size="0.004" rgba="0 1 0 1" group="4"/>
+        <geom name="marker_sticker" type="box" pos="0.12 0.018 0.0585" size="0.02 0.02 0.0005"
+              rgba="0.95 0.85 0.1 0" contype="0" conaffinity="0"/>
+        <geom name="charge_flap" type="box" pos="-0.008 0 -0.004" size="0.07 0.06 0.002"
+              rgba="0.62 0.05 0.06 0" contype="4" conaffinity="4"/>
         <geom name="inlet_backplate" class="socket" type="box" pos="-0.008 0 {CAVITY_DEPTH + 0.010:.6g}"
               size="0.075 0.065 0.004" rgba="0.12 0.12 0.12 1"/>
-        <geom name="inlet_recess_top" class="socket" type="box" pos="0.083 0 {CAVITY_DEPTH / 2 - 0.004:.6g}"
-              size="0.004 0.07 {CAVITY_DEPTH / 2 + 0.01:.6g}" rgba="0.2 0.2 0.2 1"/>
-        <geom name="inlet_recess_bottom" class="socket" type="box" pos="-0.099 0 {CAVITY_DEPTH / 2 - 0.004:.6g}"
-              size="0.004 0.07 {CAVITY_DEPTH / 2 + 0.01:.6g}" rgba="0.2 0.2 0.2 1"/>
+        <geom name="inlet_recess_bottom" class="socket" type="box" pos="-0.099 0 {(CAVITY_DEPTH + 0.0145) / 2:.6g}"
+              size="0.004 0.07 {(CAVITY_DEPTH + 0.0145) / 2:.6g}" rgba="0.2 0.2 0.2 1"/>
         {"".join(geoms)}
       </body>
     </body>"""
@@ -253,6 +266,17 @@ def _scene_xml(p: SceneParams, seg: float | None) -> str:
     <light pos="1 -1 1.5" dir="-1 1 -1" diffuse="0.5 0.5 0.5" directional="true"/>
     <geom name="floor" size="0 0 0.05" type="plane" material="groundplane" friction="0.9 0.005 0.0001"/>
     <camera name="overview" pos="0.2 -2.4 1.6" xyaxes="1 0 0 0 0.55 0.83"/>
+    <!-- Environment props, hidden by default (alpha 0, collision bit 4 = inert) and switched on per challenge. -->
+    <geom name="bay_line_l" type="box" pos="0.9 0.75 0.001" size="1.6 0.04 0.001" rgba="0.95 0.95 0.9 0" contype="0" conaffinity="0"/>
+    <geom name="bay_line_r" type="box" pos="0.9 -1.35 0.001" size="1.6 0.04 0.001" rgba="0.95 0.95 0.9 0" contype="0" conaffinity="0"/>
+    <geom name="bay_line_back" type="box" pos="-0.7 -0.3 0.001" size="0.04 1.05 0.001" rgba="0.95 0.95 0.9 0" contype="0" conaffinity="0"/>
+    <geom name="lane_arrow" type="box" pos="0.2 -0.3 0.001" size="0.25 0.02 0.001" rgba="0.95 0.8 0.1 0" contype="0" conaffinity="0"/>
+    <geom name="pillar_1" type="cylinder" pos="-0.6 1.3 1.2" size="0.18 1.2" rgba="0.62 0.62 0.6 0" contype="4" conaffinity="4"/>
+    <geom name="pillar_2" type="cylinder" pos="1.6 -2.1 1.2" size="0.18 1.2" rgba="0.62 0.62 0.6 0" contype="4" conaffinity="4"/>
+    <geom name="parked_car" type="box" pos="2.4 2.6 0.7" size="0.9 0.95 0.45" rgba="0.15 0.3 0.7 0" contype="4" conaffinity="4"/>
+    <geom name="parked_car_wheel" type="cylinder" pos="2.0 1.62 0.32" size="0.32 0.11" quat="0.7071 0.7071 0 0" rgba="0.08 0.08 0.08 0" contype="0" conaffinity="0"/>
+    <geom name="obstacle" type="box" pos="0.57 -0.30 0.80" size="0.008 0.06 0.06"
+          rgba="0.95 0.6 0.1 0" contype="4" conaffinity="4"/>
     <camera name="socket_view" pos="0.25 -0.32 0.95" xyaxes="0 -1 0 0.25 0 0.97"/>
     {_charger_xml_placeholder()}
     {_socket_xml(p)}
@@ -262,6 +286,27 @@ def _scene_xml(p: SceneParams, seg: float | None) -> str:
 
 def _charger_xml_placeholder() -> str:
     return "CHARGER_PLACEHOLDER"
+
+
+def _add_marker(spec: mujoco.MjSpec) -> None:
+    """Textured ArUco marker on the car body, a child of the socket so it moves with the car."""
+    import cv2  # local import: only needed to build the texture
+
+    d = cv2.aruco.getPredefinedDictionary(cv2.aruco.DICT_4X4_50)
+    img = cv2.aruco.generateImageMarker(d, MARKER_ID, MARKER_PIX)
+    img = cv2.copyMakeBorder(img, MARKER_PAD, MARKER_PAD, MARKER_PAD, MARKER_PAD, cv2.BORDER_CONSTANT, value=255)
+    rgb = np.repeat(img[:, :, None], 3, axis=2)
+    n = rgb.shape[0]
+    tex = spec.add_texture(name="aruco_marker", type=mujoco.mjtTexture.mjTEXTURE_2D, width=n, height=n, nchannel=3)
+    tex.data = rgb.tobytes()
+    mat = spec.add_material(name="aruco_marker")
+    mat.textures[mujoco.mjtTextureRole.mjTEXROLE_RGB] = "aruco_marker"
+    half = MARKER_SIZE * n / MARKER_PIX / 2
+    g = spec.body("socket").add_geom(
+        name="aruco_marker", type=mujoco.mjtGeom.mjGEOM_PLANE, size=[half, half, 0.01],
+        pos=list(MARKER_POS_S), quat=list(_mat2quat(MARKER_ROT_S)), material="aruco_marker",
+    )
+    g.contype = g.conaffinity = 0
 
 
 def _add_connector(spec: mujoco.MjSpec, p: SceneParams, boot_offset: float) -> None:
@@ -331,8 +376,12 @@ def _add_connector(spec: mujoco.MjSpec, p: SceneParams, boot_offset: float) -> N
         rgba=[1, 0.5, 0, 1],
         group=4,
     )
-    # Robot camera on top of the housing, looking along the insertion axis (+z), image-up = +x.
-    conn.add_camera(name="connector_cam", pos=[0.052, 0, 0.03], xyaxes=[0, 1, 0, 1, 0, 0], fovy=70)
+    # Robot camera on top of the housing, looking along the insertion axis (+z), image-up ~ +x.
+    conn.add_camera(
+        name="connector_cam", pos=[0.052, 0, 0.03], fovy=70,
+        # tilted 20 deg up so the inlet marker stays in view all the way to the seated position
+        xyaxes=[0, 1, 0, math.cos(math.radians(20)), 0, -math.sin(math.radians(20))],
+    )
 
 
 # --------------------------------------------------------------------------------------------
@@ -587,6 +636,7 @@ def build_model(params: SceneParams | None = None) -> tuple[mujoco.MjModel, Scen
     # Pass 1: no cable, solve the home pose and locate the strain relief.
     spec0 = mujoco.MjSpec.from_string(_scene_xml(p, None))
     _add_connector(spec0, p, boot_offset=0.06)
+    _add_marker(spec0)
     if p.mobile_base:
         _make_mobile(spec0)
     m0 = spec0.compile()
@@ -607,6 +657,7 @@ def build_model(params: SceneParams | None = None) -> tuple[mujoco.MjModel, Scen
     # Pass 2: full scene with cable, attachment constraints and home keyframe.
     spec = mujoco.MjSpec.from_string(_scene_xml(p, seg))
     _add_connector(spec, p, boot_offset=seg)
+    _add_marker(spec)
     if p.mobile_base:
         _make_mobile(spec)
     n = p.cable_segments

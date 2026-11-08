@@ -45,6 +45,111 @@ class DriveLimits:
     cable_tension_max: float = 60.0  # N
     strain_relief_max: float = 45.0  # N
     brake_gain: float = 20.0  # 1/s, position hold after docking (stands in for wheel brakes)
+    dock_timeout: float | None = None  # s in fine docking before accepting 'close enough'
+
+
+class TurnDriveTurn:
+    """Differential-drive parking: turn on the spot to face the goal, drive straight, turn to the
+    final heading, then brake. Robust for goals beside or behind the robot. Same interface as
+    ``DriveController`` (``phase`` uses ``DrivePhase``: DRIVE while turning/driving, DOCK for the
+    final turn, DOCKED when parked)."""
+
+    def __init__(self, model, data, dock, limits: DriveLimits | None = None) -> None:
+        self.m, self.lim = model, limits or DriveLimits()
+        self.qadr = [model.jnt_qposadr[model.joint(n).id] for n in BASE_JOINTS]
+        self.act = [model.actuator(n).id for n in BASE_ACTUATORS]
+        self.dock = np.array(dock[:2], dtype=float)
+        self.dock_yaw = math.radians(dock[2])
+        self.step_name = "turn"
+        self.phase = DrivePhase.DRIVE
+        self.phase_start = data.time
+        self.v = self.w = 0.0
+        self.hold_pose = None
+        self.travelled = 0.0
+        x, y, _ = self.pose(data)
+        self._last_xy = np.array([x, y])
+        self.events: list[tuple[float, str]] = [(round(float(data.time), 3), "drive: turn, drive straight, turn")]
+
+    def pose(self, data):
+        q = data.qpos[self.qadr]
+        return float(q[0]), float(q[1]), float(q[2])
+
+    def errors(self, data):
+        x, y, yaw = self.pose(data)
+        d = self.dock - [x, y]
+        return float(np.linalg.norm(d)), 0.0, _wrap(self.dock_yaw - yaw)
+
+    @property
+    def done(self) -> bool:
+        return self.phase in (DrivePhase.DOCKED, DrivePhase.STOPPED)
+
+    def retarget(self, data, dock) -> None:
+        moved = float(np.linalg.norm(np.array(dock[:2]) - self.dock))
+        self.dock = np.array(dock[:2], dtype=float)
+        self.dock_yaw = math.radians(dock[2])
+        if moved > 0.03 and self.step_name in ("final-turn",):
+            self.step_name, self.phase = "turn", DrivePhase.DRIVE
+
+    def step(self, data) -> None:
+        lim, dt = self.lim, self.m.opt.timestep
+        x, y, yaw = self.pose(data)
+        xy = np.array([x, y])
+        self.travelled += float(np.linalg.norm(xy - self._last_xy))
+        self._last_xy = xy
+        if self.phase in (DrivePhase.DRIVE, DrivePhase.DOCK):
+            cab = cable_metrics(self.m, data)
+            if cab.max_tension > lim.cable_tension_max or cab.strain_relief_load > lim.strain_relief_max:
+                self.phase = DrivePhase.STOPPED
+                self.events.append((round(float(data.time), 3),
+                                    f"stopped: cable pulling too hard ({max(cab.max_tension, cab.strain_relief_load):.0f} N)"))
+            elif data.time - self.phase_start > lim.timeout:
+                self.phase = DrivePhase.STOPPED
+                self.events.append((round(float(data.time), 3), "stopped: timeout"))
+        if self.phase in (DrivePhase.DOCKED, DrivePhase.STOPPED):
+            if self.hold_pose is None:
+                self.hold_pose = (x, y, yaw)
+            hx, hy, hyaw = self.hold_pose
+            k = lim.brake_gain
+            data.ctrl[self.act] = np.clip([k * (hx - x), k * (hy - y), k * _wrap(hyaw - yaw)], -1, 1)
+            return
+        d = self.dock - xy
+        dist = float(np.linalg.norm(d))
+        bearing = math.atan2(d[1], d[0])
+        v_des = w_des = 0.0
+        hold_xy = None
+        if self.step_name == "turn":
+            if dist < 0.02:
+                self.step_name, self.phase = "final-turn", DrivePhase.DOCK
+            else:
+                err = _wrap(bearing - yaw)
+                w_des = 2.0 * err
+                hold_xy = self._last_turn_xy = getattr(self, "_last_turn_xy", None) or (x, y)
+                if abs(err) < math.radians(3.0):
+                    self.step_name = "straight"
+                    self._last_turn_xy = None
+        elif self.step_name == "straight":
+            err = _wrap(bearing - yaw)
+            if dist < 0.01 or abs(err) > math.radians(60):
+                self.step_name, self.phase = "final-turn", DrivePhase.DOCK
+            else:
+                v_des = min(lim.max_speed, 0.8 * dist + 0.02) * max(0.0, math.cos(err))
+                w_des = 2.0 * err
+        if self.step_name == "final-turn":
+            err = _wrap(self.dock_yaw - yaw)
+            w_des = 2.0 * err
+            hold_xy = (float(self.dock[0]), float(self.dock[1])) if dist < 0.05 else (x, y)
+            if abs(err) < math.radians(0.7) and abs(self.w) < 0.02:
+                self.hold_pose = (x, y, yaw)
+                self.phase = DrivePhase.DOCKED
+                self.events.append((round(float(data.time), 3),
+                                    f"docked: {dist * 100:.1f} cm / {math.degrees(abs(err)):.1f} deg from target, brakes on"))
+        self.v += float(np.clip(v_des - self.v, -lim.max_accel * dt, lim.max_accel * dt))
+        w_des = float(np.clip(w_des, -lim.max_yaw_rate, lim.max_yaw_rate))
+        self.w += float(np.clip(w_des - self.w, -lim.max_yaw_accel * dt, lim.max_yaw_accel * dt))
+        vx, vy = self.v * math.cos(yaw), self.v * math.sin(yaw)
+        if hold_xy is not None:  # turning on the spot: no translation
+            vx, vy = 10 * (hold_xy[0] - x), 10 * (hold_xy[1] - y)
+        data.ctrl[self.act] = np.clip([vx, vy, self.w], -1, 1)
 
 
 def _wrap(a: float) -> float:
@@ -89,6 +194,22 @@ class DriveController:
         self.events: list[tuple[float, str]] = [(round(float(data.time), 3), f"drive: start, path {self.path_len:.2f} m")]
         self.travelled = 0.0
         self._last_xy = np.array([x, y])
+
+    def retarget(self, data, dock: tuple[float, float, float]) -> None:
+        """New docking pose while driving: re-plan the path from here, keeping the current speed."""
+        x, y, yaw = self.pose(data)
+        self.dock = np.array([dock[0], dock[1]], dtype=float)
+        self.dock_yaw = math.radians(dock[2])
+        h0 = np.array([math.cos(yaw), math.sin(yaw)])
+        h1 = np.array([math.cos(self.dock_yaw), math.sin(self.dock_yaw)])
+        k = 0.4 * float(np.linalg.norm(self.dock - [x, y]))
+        self.path = _bezier(np.array([x, y]), np.array([x, y]) + h0 * k, self.dock - h1 * k, self.dock)
+        seg = np.linalg.norm(np.diff(self.path, axis=0), axis=1)
+        self.s = np.concatenate([[0], np.cumsum(seg)])
+        self.path_len = float(self.s[-1])
+        self.idx = 0
+        if self.phase == DrivePhase.DOCK and self.path_len > self.lim.dock_switch_dist * 2:
+            self.phase = DrivePhase.DRIVE
 
     # ----------------------------------------------------------------------------------------
     def pose(self, data) -> tuple[float, float, float]:
@@ -155,6 +276,11 @@ class DriveController:
             w_des = float(np.clip(2.5 * eyaw, -0.15, 0.15))
             dist, _, _ = self.errors(data)
             ok = dist < lim.dock_pos_tol and abs(eyaw) < lim.dock_yaw_tol
+            if not ok and lim.dock_timeout is not None and data.time - self.phase_start > lim.dock_timeout:
+                self.hold_pose = (x, y, yaw)
+                self._set(data, DrivePhase.DOCKED, f"close enough after {lim.dock_timeout:.0f} s: "
+                                                   f"{dist * 100:.1f} cm / {math.degrees(abs(eyaw)):.1f} deg, brakes on")
+                return
             if ok:
                 self._ok_since = self._ok_since if self._ok_since is not None else data.time
                 if data.time - self._ok_since >= lim.dock_hold_time:
