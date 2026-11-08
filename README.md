@@ -112,6 +112,19 @@ python -m pip install -r requirements-ai.txt
 python -m pytest tests/
 ```
 
+### 7. Run the AutoCharger simulation (Google Robot + cable + CCS2-style connector)
+
+```bash
+python scripts/run_autocharge.py            # headless run with a report
+python scripts/run_autocharge.py --viewer   # interactive viewer
+python scripts/run_autocharge.py --drive-in --viewer   # start 3 m away, drive, dock, plug in
+python scripts/visual_report.py             # replay every test into outputs/test_report/index.html
+```
+
+On Windows Git Bash, activate the environment with `source .venv/Scripts/activate`.
+Design, validation results and the list of approximations are in
+[docs/autocharge_cable_connector.md](docs/autocharge_cable_connector.md).
+
 ## Project structure
 
 ```text
@@ -140,11 +153,11 @@ Develop features independently and use pull requests to integrate and review cha
 - [x] Python virtual environment configured
 - [x] MuJoCo installed and viewer tested
 - [x] Modal configured
-- [ ] Vehicle and charging-port simulation
-- [ ] Charging robot integrated
-- [ ] Alignment controller
+- [x] Vehicle and charging-port simulation (simplified CCS2-style inlet)
+- [x] Charging robot integrated (Google Robot, connector + flexible cable)
+- [x] Alignment controller (alignment-gated slow insertion)
 - [ ] Perception system
-- [ ] Recovery and safety testing
+- [x] Recovery and safety testing (force / tension limits, retry, abort, e-stop)
 - [ ] Final demonstration
 
 ## Simulation limitations
