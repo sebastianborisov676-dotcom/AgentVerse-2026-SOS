@@ -1,0 +1,12 @@
+{
+  "level": 9,
+  "seed": 42,
+  "mode": "manual",
+  "moving_car": false,
+  "random_start": true,
+  "description": "Low stone plus a static wedge; the planar robot avoids terrain rather than climbing it.",
+  "obstacles": [
+    {"kind": "stone", "x": -1.85, "y": 0.95, "size": 0.06, "angle": 0},
+    {"kind": "slope", "x": -1.5, "y": 1.9, "size": 0.5, "angle": 15}
+  ]
+}

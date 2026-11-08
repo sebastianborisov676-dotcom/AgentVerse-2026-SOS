@@ -96,6 +96,10 @@ class SceneParams:
     # where the arm's home pose was solved.
     mobile_base: bool = False
     base_start: tuple[float, float, float] = (0.0, 0.0, 0.0)
+    obstacles: tuple = ()  # training.levels.Obstacle instances
+    cable_length: float | None = None  # optional fixed physical length, never enlarged at reset
+    movable_vehicle: bool = False
+    operator_cameras: bool = False
 
 
 @dataclasses.dataclass
@@ -545,6 +549,28 @@ def route_cable_mobile(
         ]
     )
     pts, seg = _resample(_chaikin(ctrl, 3), p.cable_segments)
+    if p.cable_length is not None:
+        if not math.isfinite(p.cable_length) or p.cable_length <= 0:
+            raise ValueError("Fixed cable length must be positive and finite")
+        if seg * p.cable_segments > p.cable_length + 1e-5:
+            raise ValueError(f"Requested start infeasible: routed cable needs {seg * p.cable_segments:.3f} m, "
+                             f"physical cable is {p.cable_length:.3f} m")
+        # Add floor slack, rather than extending the cable's rest length.
+        original = ctrl.copy()
+        lo, hi = 0., 4.
+        for _ in range(30):
+            slack = (lo + hi) / 2
+            ctrl = original.copy()
+            ctrl[4, 1] -= slack
+            candidate, length = _resample(_chaikin(ctrl, 3), p.cable_segments)
+            if length * p.cable_segments < p.cable_length:
+                lo = slack
+            else:
+                hi = slack
+            pts = candidate
+        seg = p.cable_length / p.cable_segments
+        if abs(length - seg) > 1e-5:
+            raise ValueError("Cannot route fixed cable with available floor slack")
     pts[0] = anchor
     pts[1] = anchor + out_dir * seg
     pts[-1] = sr_pos
@@ -589,6 +615,9 @@ def build_model(params: SceneParams | None = None) -> tuple[mujoco.MjModel, Scen
     _add_connector(spec0, p, boot_offset=0.06)
     if p.mobile_base:
         _make_mobile(spec0)
+    if p.movable_vehicle or p.operator_cameras:
+        from autocharge.panel.scenario import augment_spec
+        augment_spec(spec0, p)
     m0 = spec0.compile()
     d0 = mujoco.MjData(m0)
     q_home, ik_pe, ik_re = _home_ik(m0, d0, p)  # solved with the base at the docking pose
@@ -609,6 +638,9 @@ def build_model(params: SceneParams | None = None) -> tuple[mujoco.MjModel, Scen
     _add_connector(spec, p, boot_offset=seg)
     if p.mobile_base:
         _make_mobile(spec)
+    if p.movable_vehicle or p.operator_cameras:
+        from autocharge.panel.scenario import augment_spec
+        augment_spec(spec, p)
     n = p.cable_segments
     last, second_last = spec.body(f"cable_{n}"), spec.body(f"cable_{n - 1}")
     last.add_site(name="cable_end", size=[0.004, 0, 0], group=4)
@@ -667,6 +699,11 @@ def build_model(params: SceneParams | None = None) -> tuple[mujoco.MjModel, Scen
         anchor_to_connector=float(np.linalg.norm(sr_pos - anchor)),
         socket_rot=socket_rotation(),
     )
+    if p.obstacles:
+        from autocharge.training.course import add_obstacles
+
+        add_obstacles(spec, p.obstacles, protect_start=not p.operator_cameras)
+        model = spec.compile()
     return model, info
 
 
