@@ -17,7 +17,7 @@ DRIVE_IN_PARAMS = SceneParams(mobile_base=True, base_start=(-3.0, 0.5, 15.0), ca
 
 # A long cable dragging on the floor loads the connector more (~13 N vs ~5 N when parked next to
 # the charger), so the arm needs more servo authority than the fixed-base default.
-MISSION_INSERTION_LIMITS = dataclasses.replace(InsertionLimits(), joint_lead_max=0.4)
+MISSION_INSERTION_LIMITS = dataclasses.replace(InsertionLimits(), joint_lead_max=0.4, lead_torque_max=12.0)
 
 
 class ChargingMission:
@@ -31,9 +31,10 @@ class ChargingMission:
         insertion_limits: InsertionLimits | None = None,
         socket_estimate=None,
         hold_gain: float = 3.0,
+        obstacles=None,
     ) -> None:
         self.m = model
-        self.drive = DriveController(model, data, limits=drive_limits)
+        self.drive = DriveController(model, data, limits=drive_limits, obstacles=obstacles)
         self.insertion: InsertionController | None = None
         self._ins_limits = insertion_limits or MISSION_INSERTION_LIMITS
         self._socket_estimate = socket_estimate

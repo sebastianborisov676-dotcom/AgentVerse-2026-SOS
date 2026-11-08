@@ -169,10 +169,123 @@ Approximations specific to driving:
   wheel odometry plus a camera or fiducial on the charging bay.
 * The 140 kg base mass comes from the robot model's mesh density, not a datasheet.
 
-## Next step: camera-based autonomy
+## Perception-driven autonomy (camera in the loop)
 
-The stability checks above pass, so perception can be added. Cameras `connector_cam` (on the
-connector, looking along the plug axis), `socket_view` and `overview` are already in the scene.
-Perception only has to produce `socket_estimate=(position, rotation)` for
-`InsertionController`; the tests show the system tolerates ≤ 3 mm error and aborts safely above
-that.
+`python scripts/autonomy_demo.py` opens the MuJoCo viewer plus a robot-camera window showing the
+detection, the estimated socket axis and every decision. Arrow keys and `[` `]` push the car,
+`B` blocks the camera's view of the inlet, and `E` triggers an emergency stop. The robot is not told
+about any of these changes. `--record outputs/demo.mp4 --move-at 3` writes a headless video.
+
+**Loop (10 Hz perception, 500 Hz control):** Observe → Estimate → Decide → Act → Verify.
+
+| Stage | Implementation | File |
+|---|---|---|
+| Observe | Robot camera on the connector (`connector_cam`, 960×720, 70° FOV, tilted 20° up) rendered by MuJoCo | `perception.py` |
+| Detect | OpenCV ArUco detection of a fiducial on the car beside the inlet; sub-pixel corners | `perception.py` |
+| Estimate | `solvePnP` (IPPE_SQUARE), reprojection-error check, camera pose from the arm's own joint angles, fixed marker→socket calibration | `perception.py` |
+| Filter | Exponential filter; a jump > 4 mm / 1.5° means the car moved | `perception.py` (`PoseFilter`) |
+| Decide | Agent states SEARCHING → TRACKING → SUCCESS / SAFE_STOP / FAILED on top of the insertion controller's APPROACH → ALIGN → INSERT → SEATED / RETRACT / ABORTED | `autonomy.py`, `controller.py` |
+| Act | Damped-least-squares Cartesian servo on the robot's original position actuators | `controller.py` |
+| Disturb | Scenario manager moves or covers the car independently of the robot | `scenarios.py` |
+
+**Supervisor rules (all from measurements):**
+- No reliable detection: the arm never moves. FAILED after 6 s.
+- Detection stale for more than 0.35 s while approaching or aligning: hold position. Lost for more than 4 s: SAFE_STOP before any contact.
+- Car moves before the pins engage: re-plan (back to approach, or back out of an insertion) and re-align.
+- Car moves after the pins engage (more than 8 mm deep, past the chamfer), the plug is pushed off axis while engaged, or contact force passes 70 N while engaged: SAFE_STOP. The robot holds still and doesn't chase or yank with the plug inserted. Shallower chamfer deflection still backs out and retries.
+- The force, cable-tension, strain-relief and deflection limits from the earlier controller still apply.
+
+**Ground truth is never used for control.** The agent and perception code never read the
+simulator's socket pose. It is used only by `evaluate` / `socket_estimate_error` and in test
+assertions. `test_wrong_calibration_misleads_robot` shifts the marker calibration by 8 mm, and the
+robot then follows its wrong perception and fails to seat. That shows the camera, not hidden data,
+drives the motion.
+
+**Measured (this laptop, CPU only):**
+- Pose estimate at the start pose: about 0.2–0.6 mm and 0.1–0.2° from ground truth at 0.3 m range.
+- Perception takes about 70–90 ms per frame (render + detect + PnP).
+- Nominal run: seated with 0.13 mm real lateral error.
+- Random parking (±3 cm along the axis, ±4 cm sideways, ±3 cm height, ±4°): seated.
+- Car rolls 3 cm sideways and turns 3° during the approach: the robot detects the jump within 0.3 s and re-plans. Its first two insertion attempts drift about 2.5 mm, from joint stick-slip in the new arm pose, so the deflection watchdog backs out. It seats on attempt 3.
+- Inlet view blocked: the arm never moves and the agent reports FAILED.
+- Car moved while engaged: SAFE_STOP.
+
+### Proof of independence
+
+**Three separate roles.**
+
+| Role | Code | Sees |
+|---|---|---|
+| Robot agent | `perception.py`, `autonomy.py`, `controller.py` | Camera images, camera calibration, its own joint angles, simulated force/cable load sensing |
+| Environment | `scenarios.py` | Moves the car, changes lighting, closes the flap, blocks the view. Never talks to the agent |
+| Independent evaluator | `evaluation.py` | Reads the physical socket pose (ground truth) to judge docking. Not imported by the agent |
+
+**Experiments (all automated tests, `tests/test_independence.py` and `tests/test_autonomy.py`):**
+
+| Experiment | What it proves | Result |
+|---|---|---|
+| Ground-truth poisoning: the simulator's socket "answer key" site shifted by 2 cm | The agent never reads it | Still docks (independent checker) |
+| Calibration error injected (8 mm) | Actions follow perception | Robot follows its wrong estimate and doesn't seat |
+| Camera blocked from the start | Perception gates movement | Arm never moves, reports FAILED |
+| Camera blocked mid-approach (1.5–3 s) | Pauses on stale perception | Logs "hold", then "resume" when visible, docks |
+| Car moves before engagement | Adaptation | Detects the jump and re-plans, docks |
+| Car moves while engaged | Safety | SAFE_STOP, no chasing or yanking |
+| Lighting at 15% / 3% | Robust or refuses when unsure | Docks / never moves |
+| Charging flap closed | No false success | Jam detected by force, bounded retries, FAILED. Checker: not docked |
+| Success claim vs independent checker | Success is verified | Agent's "seated" agrees with the checker (≥ 30 mm depth, inside clearance) |
+
+**Held-out benchmark** (`python scripts/benchmark.py`): 10 trials with seeds 1000–1009, never used during development. Every trial has random parking (±3 cm along the axis, ±4 cm sideways, ±3 cm height, ±4°), and the odd-numbered trials also have a random car move during the approach. Each trial runs with both controllers. The independent checker judges every result.
+
+| Controller | Scenario | Trials | Docked | Unsafe contacts (> 70 N) | Median sim time (docked) |
+|---|---|---|---|---|---|
+| Autonomous (camera) | random parking | 5 | **5/5** | 0 | 16.9 s |
+| Autonomous (camera) | random parking + car moves | 5 | **5/5** | 0 | 17.1 s |
+| Pre-programmed (fixed nominal coordinates) | random parking | 5 | 0/5 | 0 | – |
+| Pre-programmed (fixed nominal coordinates) | random parking + car moves | 5 | 0/5 | 0 | – |
+
+The pre-programmed controller jammed on the socket rim every time, at 12–44 N peak force, then backed out and aborted thanks to the force limits. The autonomous agent docked in all 10, with zero contact force in 10/10 and retries needed in 1/10 (trial 7: two retries after a car move). Ten trials is a small sample, so this is not a reliability figure for the real world.
+
+**Not demonstrated** (no sensor or mechanism for it, so not claimed): glare and lens effects, recognising the inlet without the marker, exploring round a car to find a socket on its far side.
+
+### Car park and obstacle-aware driving
+
+**Scene.** One permanent car park:
+- **Layout:** 12 parallel bays in two rows with white markings, and a 6 m central lane with dashes.
+- **Charging area:** a concrete walkway with a kerb line, a green EV bay, the charger and three yellow bollards.
+- **Surroundings:** lamp posts with lights, a perimeter wall, planting with trees, wheelie bins, and eight parked cars.
+- **Target car:** 4.6 × 1.85 m, with a cabin and four wheels, and the inlet on the rear quarter above the wheel arch.
+
+Cars, bollards, posts, walls and bins are solid. Paint and markings don't collide.
+
+**Sensing obstacles.** The mobile robot carries a **simulated planar LiDAR**: 180 beams through 360° at 0.40 m height, 4 m range, ray-cast against the scene. It returns only ranges, never object identities or positions.
+
+**Planning and driving** (`navigation.py`):
+1. **Map:** scan points go into a 5 cm occupancy grid, inflated by 0.42 m for the base.
+2. **Route:** A\* (8-connected) is simplified to line-of-sight waypoints, and the waypoints are driven with turn–drive–turn legs.
+3. **Re-planning:** while driving, it re-scans every 0.5 s. When new cells appear in the map, it checks the remaining route against the bare 0.30 m footprint and re-plans if needed.
+4. **Refusal:** if no route exists, it stops with "no collision-free route" or "route now blocked" and does not drive.
+
+| Scenario (`tests/test_navigation.py`) | Result |
+|---|---|
+| Car 1.5 m away, black bin bag on the direct route | "LiDAR: obstacle on the direct route, detour …", docked, **0 contacts** with the bag |
+| Same spot, no bag | "direct route clear", drove straight, docked |
+| Three parked cars around the target (front, behind, far side) | Docked from the open side, **0 contacts** with neighbours |
+| Bag sitting on the parking spot | Refused, base didn't move |
+
+**Challenge app (11 tests):** `python scripts/interactive_test.py`
+- **Load a test:** keys 1–0 and −.
+- **Change the world:** K drops a bag on the route, N parks neighbour cars, M makes the car roll now, and the earlier keys still work.
+- **What the 3D view shows:** red dots are the robot's LiDAR returns and the blue line is the route it planned, both drawn from the robot's own data.
+- **Verdicts:** SAFETY now counts any contact between the robot and bags, cars, bollards, walls or the charger.
+
+**Limits:**
+- **Parking with detours is slow:** about 30–40 s, because of stop-turn-drive legs.
+- **The LiDAR is planar at 0.40 m,** so objects lower than that are invisible to it.
+- **It doesn't check clearance before rotating** on the spot, so the extended arm could swing into a car parked very close. Touch sensing then stops it.
+- **Test 2 (socket on the far side) ends in a justified refusal** rather than driving round the car to look.
+
+**Honest limits of the perception:**
+- **The inlet is found by a fiducial marker on the car, not by recognising the bare CCS2 inlet.** The marker-to-socket transform is a fixed calibration of the inlet geometry. A learned inlet detector (the teammate's model) can replace `PortPerception._estimate` behind the same `PortEstimate` interface.
+- **The final few millimetres of insertion are blind.** The marker leaves the camera's view, so they rely on the last estimate plus force sensing.
+- Rendering is clean (no lens distortion); `pixel_noise` can add noise. Lighting changes have not been evaluated yet.
+- The drive-in mission still docks the base on true odometry. Camera perception starts once the robot is parked.
