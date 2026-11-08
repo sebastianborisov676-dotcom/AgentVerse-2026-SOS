@@ -24,7 +24,8 @@ import numpy as np
 
 from autocharge.base_controller import DriveController, DriveLimits, DrivePhase, TurnDriveTurn
 from autocharge.controller import InsertionController, InsertionLimits, Phase
-from autocharge.navigation import Lidar, OccupancyGrid, WaypointDrive, path_length, plan_path
+from autocharge.navigation import (Lidar, OccupancyGrid, WaypointDrive, cable_line_clear, cable_shadow,
+                                   path_length, plan_path)
 from autocharge.perception import PortEstimate, PortPerception, PoseFilter
 from autocharge.scene import ARM_JOINTS, BASE_JOINTS, arm_dof_indices, solve_ik
 
@@ -128,6 +129,11 @@ class AutonomousAgent:
         # Obstacle sensing for driving: planar LiDAR on the base (mobile robots only).
         self.lidar = Lidar(model) if self.mobile else None
         self.grid: OccupancyGrid | None = None
+        # Cable-aware navigation: the charger outlet is a fixed point of the robot's own installation
+        # (where its tether starts), not information about the car.
+        self.cable_anchor = (data.site_xpos[model.site("cable_anchor").id][:2].copy()
+                             if self.mobile else None)
+        self.cable_shadow: np.ndarray | None = None
         self.nav_path: list | None = None
         self.lidar_points = np.zeros((0, 2))
         self._next_rescan = 0.0
@@ -415,7 +421,8 @@ class AutonomousAgent:
         dist = math.hypot(tgt[0] - cur[0], tgt[1] - cur[1])
         self.grid = OccupancyGrid(center=((cur[0] + tgt[0]) / 2, (cur[1] + tgt[1]) / 2), size=max(6.0, 2 * dist + 3.0))
         self.grid.add_points(pts)
-        path = plan_path(self.grid, cur[:2], tgt[:2])
+        self.cable_shadow = cable_shadow(self.grid, self.cable_anchor)
+        path = plan_path(self.grid, cur[:2], tgt[:2], shadow=self.cable_shadow)
         if path is None:
             self._decide(data, f"LiDAR: {len(pts)} returns, route to the parking pose is blocked")
             return False
@@ -428,6 +435,7 @@ class AutonomousAgent:
             self.drive = WaypointDrive(self.m, data, path, tgt[2])
             self._decide(data, f"LiDAR: obstacle on the direct route, detour {path_length(path):.2f} m via "
                                f"{len(path) - 2} waypoint(s) (direct {dist:.2f} m)")
+        self._report_cable(data, path)
         self._next_rescan = float(data.time) + 0.5
         return True
 
@@ -457,7 +465,8 @@ class AutonomousAgent:
         yaw = getattr(self.drive, "final_yaw", None)
         if yaw is None:
             yaw = math.degrees(self.drive.dock_yaw)
-        path = plan_path(self.grid, cur, tgt_xy)
+        self.cable_shadow = cable_shadow(self.grid, self.cable_anchor)
+        path = plan_path(self.grid, cur, tgt_xy, shadow=self.cable_shadow)
         if path is None:
             self.drive = None
             self._brake(data)
@@ -468,6 +477,18 @@ class AutonomousAgent:
         self.drive = WaypointDrive(self.m, data, path, yaw) if len(path) > 2 else \
             TurnDriveTurn(self.m, data, dock=(float(tgt_xy[0]), float(tgt_xy[1]), yaw), limits=DriveLimits(timeout=60.0))
         self._decide(data, f"LiDAR: new obstacle ahead, re-planned route ({path_length(path):.2f} m)")
+        self._report_cable(data, path)
+
+    def _report_cable(self, data, path) -> None:
+        """Log whether the planned route keeps the taut cable line clear of observed obstacles."""
+        if self.grid is None or self.cable_anchor is None or not self.grid.occ.any():
+            return
+        bad = sum(1 for w in path[1:] if not cable_line_clear(self.grid, self.cable_anchor, w))
+        if bad:
+            self._decide(data, f"cable check: cable line crosses an obstacle at {bad} waypoint(s); "
+                               "least-wrap route chosen")
+        else:
+            self._decide(data, "cable check: route keeps the charging cable clear of obstacles")
 
     def _observe(self, data) -> None:
         est = self.perception.observe(data)

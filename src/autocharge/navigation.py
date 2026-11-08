@@ -6,6 +6,11 @@
 * ``OccupancyGrid``: world-frame grid (5 cm cells) filled from scans using the robot's own
   odometry, inflated by the base radius plus a safety margin.
 * ``plan_path``: 8-connected A* from the robot to the goal, simplified to line-of-sight waypoints.
+* ``cable_shadow``: cable-aware cost map. The charging cable runs from the charger outlet (a fixed,
+  known point of the robot's own installation) to the robot; when pulled taut it lies on the straight
+  line outlet -> robot. Any cell whose straight line back to the outlet crosses an observed obstacle is
+  in that obstacle's "cable shadow": standing there means the cable must wrap round the obstacle and
+  can snag. A* pays extra for shadow cells, so detours go round the side that keeps the cable clear.
 * ``WaypointDrive``: chains ``TurnDriveTurn`` legs through the waypoints and ends at the goal heading.
 """
 
@@ -100,9 +105,52 @@ class OccupancyGrid:
         return True
 
 
-def plan_path(grid: OccupancyGrid, start, goal, start_free_radius: float = 0.3) -> list[np.ndarray] | None:
+def _cable_obstacles(grid: OccupancyGrid, anchor, clearance: float, anchor_free: float) -> np.ndarray:
+    obst = grid.mask(clearance)
+    a = np.asarray(anchor, float)[:2]
+    ai, aj = np.floor((a - grid.origin) / grid.res).astype(int)
+    r = int(math.ceil(anchor_free / grid.res))
+    obst[max(0, ai - r):max(0, ai + r + 1), max(0, aj - r):max(0, aj + r + 1)] = False
+    return obst
+
+
+def cable_shadow(grid: OccupancyGrid, anchor, clearance: float = 0.15, anchor_free: float = 0.35) -> np.ndarray:
+    """Boolean grid: True where the taut cable line from ``anchor`` to that cell would cross an
+    observed obstacle (inflated by ``clearance``). Obstacles within ``anchor_free`` of the outlet
+    (the charger pedestal itself) are ignored - the cable leaves the outlet there."""
+    obst = _cable_obstacles(grid, anchor, clearance, anchor_free)
+    a = np.asarray(anchor, float)[:2]
+    n = grid.n
+    ii, jj = np.mgrid[0:n, 0:n]
+    cells = grid.origin + (np.stack([ii, jj], -1) + 0.5) * grid.res
+    far = float(np.linalg.norm(cells - a, axis=-1).max())
+    shadow = np.zeros((n, n), bool)
+    for t in np.linspace(0.0, 1.0, max(8, int(far / (grid.res * 0.7)))):
+        idx = np.floor((a + t * (cells - a) - grid.origin) / grid.res).astype(int)
+        inside = (idx[..., 0] >= 0) & (idx[..., 0] < n) & (idx[..., 1] >= 0) & (idx[..., 1] < n)
+        hit = np.zeros((n, n), bool)
+        hit[inside] = obst[idx[..., 0][inside], idx[..., 1][inside]]
+        shadow |= hit
+    return shadow & ~obst
+
+
+def cable_line_clear(grid: OccupancyGrid, anchor, point, clearance: float = 0.15, anchor_free: float = 0.35) -> bool:
+    """Would the taut cable from ``anchor`` to ``point`` stay clear of observed obstacles?"""
+    obst = _cable_obstacles(grid, anchor, clearance, anchor_free)
+    a, b = np.asarray(anchor, float)[:2], np.asarray(point, float)[:2]
+    for t in np.linspace(0, 1, max(2, int(np.linalg.norm(b - a) / (grid.res * 0.5)))):
+        i, j = grid.cell(a + (b - a) * t)
+        if obst[i, j]:
+            return False
+    return True
+
+
+def plan_path(grid: OccupancyGrid, start, goal, start_free_radius: float = 0.3,
+              shadow: np.ndarray | None = None, shadow_cost: float = 6.0) -> list[np.ndarray] | None:
     """A* over the inflated grid; cells near the robot's own position are treated as free (the
-    robot is standing there). Returns simplified world waypoints ending at ``goal``, or None."""
+    robot is standing there). Returns simplified world waypoints ending at ``goal``, or None.
+    With a ``shadow`` map (``cable_shadow``) each step into a shadow cell costs ``1 + shadow_cost``
+    times as much, so the route keeps the charging cable clear of obstacles whenever it can."""
     blocked = grid.blocked.copy()
     si, sj = grid.cell(start)
     rr = int(start_free_radius / grid.res)
@@ -123,7 +171,7 @@ def plan_path(grid: OccupancyGrid, start, goal, start_free_radius: float = 0.3) 
             nb = (cur[0] + di, cur[1] + dj)
             if not (0 <= nb[0] < grid.n and 0 <= nb[1] < grid.n) or blocked[nb]:
                 continue
-            nc = cost[cur] + w
+            nc = cost[cur] + (w * (1.0 + shadow_cost) if shadow is not None and shadow[nb] else w)
             if nc < cost.get(nb, 1e18):
                 cost[nb] = nc
                 parent[nb] = cur
@@ -135,8 +183,14 @@ def plan_path(grid: OccupancyGrid, start, goal, start_free_radius: float = 0.3) 
         cells.append(parent[cells[-1]])
     pts = [grid.world(c) for c in reversed(cells)]
     pts[0], pts[-1] = np.asarray(start, float), np.asarray(goal, float)
-    # Line-of-sight simplification (checked against the inflated grid, start cells freed).
+    # Line-of-sight simplification (checked against the inflated grid, start cells freed). With a
+    # cable shadow, shortcuts may not cut through shadow cells the A* route itself avoided.
     saved = grid.blocked
+    if shadow is not None:
+        on_route = np.zeros_like(blocked)
+        for ci, cj in cells:
+            on_route[max(0, ci - 1):ci + 2, max(0, cj - 1):cj + 2] = True
+        blocked = blocked | (shadow & ~on_route)
     grid.blocked = blocked
     out = [pts[0]]
     k = 0
