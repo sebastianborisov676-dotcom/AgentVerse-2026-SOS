@@ -5,6 +5,50 @@
 
 AutoCharger AI is a simulated autonomous electric-vehicle charging assistant. It aims to identify a vehicle's charging port, align a robotic charging connector, and perform a controlled connection while responding to changing conditions.
 
+## Run the demo (submission version)
+
+This version combines Sebastian's operator control panel, obstacle courses and Level 11 master challenge with SAI's
+camera-driven autonomy, LiDAR navigation and car-park judge app (branch `integration/autocharger-demo`).
+Tested on Windows 11 with Python 3.13, MuJoCo 4.0.0, NumPy 2.5 and OpenCV 5.0. Simulation only; CPU only.
+
+```bash
+git clone https://github.com/sebastianborisov676-dotcom/AgentVerse-2026-SOS.git
+cd AgentVerse-2026-SOS
+bash scripts/setup.sh    # creates .venv, installs requirements-all.txt, downloads Google Robot (MuJoCo Menagerie)
+source .venv/bin/activate   # Windows (Git Bash): source .venv/Scripts/activate
+```
+
+The robot model is downloaded by `setup.sh` into `models/` and is not stored in Git.
+
+**1. Operator control panel: obstacle Levels 1–11, moving car, master challenge**
+
+```bash
+python scripts/run_control_panel.py          # then open http://127.0.0.1:8765
+```
+
+The panel renders offscreen with EGL by default (Linux). On Windows or macOS set `MUJOCO_GL=glfw` first
+(`export MUJOCO_GL=glfw`, or in PowerShell `$env:MUJOCO_GL="glfw"`).
+Master-challenge demo settings: **Level 11, obstacles Random, Randomize start on, Car challenge on, seed 42**:
+the robot detects the obstacle, detours, brakes when the car moves, re-targets and seats the connector.
+Seed 43 ends in a deliberate safe stop when the cable strain-relief load reaches its 45 N limit.
+
+**2. Judge app in the car park: 11 challenges, camera + LiDAR autonomy**
+
+```bash
+python scripts/interactive_test.py
+```
+
+Click the "robot view" window so it has keyboard focus. Keys `1`–`0` and `-` pick a challenge and `SPACE` starts it. `K` drops a bin bag, `N` parks neighbour cars,
+`M` makes the car roll, and `WASD`/`QE` move the car.
+The robot only sees through its own camera and LiDAR; an independent checker grades each run.
+
+**3. Reproducible checks**
+
+```bash
+python scripts/run_course_batch.py --levels 1 9 11 --seeds 42 43 --output outputs/course_batch.json
+python -m pytest tests
+```
+
 ## Project objectives
 
 - Detect the charging port using simulated camera observations.
@@ -217,6 +261,8 @@ python -m pytest tests                      # all automated tests from both bran
   360 deg search at three camera tilts, holds when perception is stale, re-plans when the car moves,
   safe stop on unexpected touch or when the car moves while the plug is engaged.
 - **Navigation** (`navigation.py`): simulated planar LiDAR -> occupancy grid -> A* -> waypoint driving.
+  Cable-aware: cells whose straight cable line back to the charger outlet would cross an observed obstacle
+  cost more, so detours go round the side that keeps the charging cable from wrapping round and snagging.
 - **Independent evaluator** (`evaluation.py`): judges docking from the physical socket pose; the agent never imports it.
 
 Design notes, measured results and limitations: `docs/autocharge_cable_connector.md`, one-page summary:
