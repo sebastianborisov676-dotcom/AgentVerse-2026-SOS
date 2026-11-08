@@ -31,9 +31,10 @@ class ChargingMission:
         insertion_limits: InsertionLimits | None = None,
         socket_estimate=None,
         hold_gain: float = 3.0,
+        obstacles=None,
     ) -> None:
         self.m = model
-        self.drive = DriveController(model, data, limits=drive_limits)
+        self.drive = DriveController(model, data, limits=drive_limits, obstacles=obstacles)
         self.insertion: InsertionController | None = None
         self._ins_limits = insertion_limits or MISSION_INSERTION_LIMITS
         self._socket_estimate = socket_estimate

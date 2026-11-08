@@ -63,6 +63,7 @@ class DriveController:
         data: mujoco.MjData,
         dock: tuple[float, float, float] = (0.0, 0.0, 0.0),  # x m, y m, yaw deg
         limits: DriveLimits | None = None,
+        obstacles=None,
     ) -> None:
         self.m, self.lim = model, limits or DriveLimits()
         self.qadr = [model.jnt_qposadr[model.joint(n).id] for n in BASE_JOINTS]
@@ -77,6 +78,10 @@ class DriveController:
         dist = float(np.linalg.norm(self.dock - [x, y]))
         k = 0.4 * dist
         self.path = _bezier(np.array([x, y]), np.array([x, y]) + h0 * k, self.dock - h1 * k, self.dock)
+        self.obstacles = obstacles
+        if obstacles is not None:
+            from autocharge.training.navigation import course_path
+            self.path = course_path((x, y), yaw, self.dock, self.dock_yaw, obstacles)
         seg = np.linalg.norm(np.diff(self.path, axis=0), axis=1)
         self.s = np.concatenate([[0], np.cumsum(seg)])
         self.path_len = float(self.s[-1])
@@ -120,6 +125,12 @@ class DriveController:
         self._last_xy = xy
 
         if self.phase in (DrivePhase.DRIVE, DrivePhase.DOCK):
+            if self.obstacles is not None:
+                from autocharge.training.navigation import segment_clear
+                # Include braking distance; stop rather than cutting a planned corner.
+                ahead = xy + np.array([math.cos(yaw), math.sin(yaw)]) * (abs(self.v)*0.5 + self.v**2/(2*lim.max_accel))
+                if not segment_clear(xy, ahead, self.obstacles, clearance=0.43):
+                    self._set(data, DrivePhase.STOPPED, "obstacle safety clearance")
             cab = cable_metrics(self.m, data)
             if cab.max_tension > lim.cable_tension_max:
                 self._set(data, DrivePhase.STOPPED, f"cable tension {cab.max_tension:.1f} N")

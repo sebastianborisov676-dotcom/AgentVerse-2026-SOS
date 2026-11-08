@@ -50,10 +50,22 @@ def main() -> int:
     ap.add_argument("--perception-error-mm", type=float, default=0.0)
     ap.add_argument("--max-time", type=float, default=70.0, help="simulated seconds")
     ap.add_argument("--drive-in", action="store_true", help="start 3 m away: drive, dock, then insert")
+    ap.add_argument("--level", type=int, choices=range(1, 11), help="seeded obstacle course (enables drive-in)")
+    ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--placement", choices=("random", "manual", "hybrid"), default="random")
+    ap.add_argument("--manual-layout", type=pathlib.Path, help="JSON with an obstacles list")
     args = ap.parse_args()
+    obstacles = None
+    params = DRIVE_IN_PARAMS if args.drive_in else None
+    if args.level is not None:
+        from autocharge.training.course import make_course, load_manual
+        obstacles = make_course(args.level, args.seed,
+                                load_manual(args.manual_layout) if args.manual_layout else (), args.placement)
+        args.drive_in = True
+        params = dataclasses.replace(DRIVE_IN_PARAMS, obstacles=obstacles)
 
     t0 = time.time()
-    model, info = build_model(DRIVE_IN_PARAMS if args.drive_in else None)
+    model, info = build_model(params)
     data = mujoco.MjData(model)
     reset_to_home(model, data)
     print(f"Scene built in {time.time() - t0:.1f} s  (nq={model.nq}, bodies={model.nbody})")
@@ -66,7 +78,7 @@ def main() -> int:
         sid = model.site("socket_face").id
         rot = data.site_xmat[sid].reshape(3, 3).copy()
         pos = data.site_xpos[sid].copy() + rot[:, 0] * args.perception_error_mm * 1e-3
-        mission = ChargingMission(model, data, socket_estimate=(pos, rot))
+        mission = ChargingMission(model, data, socket_estimate=(pos, rot), obstacles=obstacles)
         ctrl = mission
     else:
         mission = None

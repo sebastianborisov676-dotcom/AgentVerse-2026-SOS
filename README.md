@@ -169,3 +169,32 @@ The initial prototype will use simulated vehicles, connectors and sensors. Succe
 Developed by Team SOS for AgentVerse 2026.
 
 Simulation: Google DeepMind MuJoCo.
+
+
+## Progressive obstacle course
+
+Run `python scripts/run_autocharge.py --level 2 --seed 0 --viewer` for the course demonstration,
+or `python scripts/run_course_batch.py --engine panel --levels 1 2 5 10 --seeds 42 43 --workers 2` for headless evaluation.
+See [course documentation](docs/obstacle_course.md) for manual layouts, the training API,
+reproducibility and physics approximations.
+
+
+## Local operator control panel
+
+```bash
+.venv/bin/python scripts/run_control_panel.py
+```
+
+Open **http://127.0.0.1:8765** for the level/seed selector, obstacle editor, live MuJoCo
+RGB/depth views, telemetry, recording timeline and A/B comparisons. Default seed: **42**.
+Levels 9–10 include the optional moving-car challenge. The panel uses a fixed physical
+cable and limited-range ray observations; infeasible starts are reported.
+See [control-panel documentation](docs/control_panel.md) for operating instructions,
+checkpoint/playback distinctions, validation and explicit physics/perception approximations.
+
+
+Current revision: [browser verification and parallel results](docs/operator_validation.md).
+Sample layouts: [single avoidance box](layouts/box_avoidance.json) and
+[stone + slope](layouts/stone_slope.json). The batch runner now defaults to the same
+scenario builder and sensor-based controller as the panel; use `--engine legacy` only
+for the earlier privileged-map baseline.

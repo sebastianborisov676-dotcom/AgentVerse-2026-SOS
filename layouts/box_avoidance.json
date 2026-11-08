@@ -1,0 +1,9 @@
+{
+  "level": 9,
+  "seed": 42,
+  "mode": "manual",
+  "moving_car": false,
+  "random_start": true,
+  "description": "A box near the nominal route, clear of the initial robot/cable; exercises ray detection and route adaptation. Completion is not guaranteed.",
+  "obstacles": [{"kind": "box", "x": -1.7, "y": 0.8, "size": 0.22, "angle": 0}]
+}
