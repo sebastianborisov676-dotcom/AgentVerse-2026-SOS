@@ -39,6 +39,7 @@ class Phase(enum.Enum):
     RETRACT = "retract"
     ABORTED = "aborted"
     ESTOP = "estop"
+    SAFE_STOP = "safe_stop"  # supervisor hold: no further motion or force (e.g. car moved while engaged)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -63,6 +64,9 @@ class InsertionLimits:
     max_retries: int = 2
     force_filter_tau: float = 0.03  # s, first-order low-pass modelling a wrist F/T sensor
     joint_lead_max: float = 0.15  # rad, anti-windup bound |q_ref - q|
+    lead_torque_max: float | None = None  # N m; if set, per-joint bound = max(joint_lead_max, this / kp)
+    align_max_speed: float = 0.003  # m/s, plug must be settled before insertion starts
+    max_replans: int = 6  # target updates that force a re-approach (car moved), before giving up
 
 
 @dataclasses.dataclass
@@ -101,6 +105,9 @@ class InsertionController:
         self.act = np.array([self._actuator_for(model, j) for j in jids])
         kp = model.actuator_gainprm[self.act, 0]
         self.fric_offset = friction_comp * model.dof_frictionloss[self.dadr] / kp
+        self.lead = np.full(len(kp), self.limits.joint_lead_max)
+        if self.limits.lead_torque_max is not None:
+            self.lead = np.maximum(self.lead, self.limits.lead_torque_max / kp)
         self.fric_eps = fric_eps
         self.plug = model.site("plug_face").id
         self.sock = model.site("socket_face").id
@@ -123,6 +130,10 @@ class InsertionController:
             "strain_relief": 0.0,
         }
         self.force_filt = 0.0
+        self.hold = False  # set by the autonomy layer while perception is unreliable
+        self.replans = 0
+        self._last_jump = -1e9
+        self._vel = np.zeros(6)
 
         mujoco.mj_forward(model, data)
         # Socket pose the controller acts on. Ground truth by default; pass an estimate (e.g. from
@@ -151,7 +162,7 @@ class InsertionController:
 
     @property
     def done(self) -> bool:
-        return self.phase in (Phase.SEATED, Phase.ABORTED, Phase.ESTOP)
+        return self.phase in (Phase.SEATED, Phase.ABORTED, Phase.ESTOP, Phase.SAFE_STOP)
 
     def _log(self, data, msg: str) -> None:
         self.events.append((round(float(data.time), 3), msg))
@@ -162,6 +173,44 @@ class InsertionController:
         self._aligned_since = None
         self._paused_since = None
         self._log(data, f"{phase.value}: {why}")
+
+    def engaged(self, data) -> bool:
+        """Pins are inside the socket (estimated): from here the robot must not chase the car."""
+        # 8 mm of pin depth: past the 4 mm chamfer lead-in, so chamfer deflection still backs out.
+        return self._estimated_alignment(data).axial > -PIN_LENGTH + 0.008
+
+    def safe_stop(self, data, why: str) -> None:
+        if self.phase != Phase.SAFE_STOP:
+            self._set_phase(data, Phase.SAFE_STOP, why)
+
+    def retarget(self, data, position, rotation, jumped: bool) -> None:
+        """New socket estimate from perception (visual servoing input)."""
+        if self.phase in (Phase.ABORTED, Phase.ESTOP, Phase.SAFE_STOP):
+            return
+        moved = float(np.linalg.norm(np.asarray(position) - self.socket_pos)) * 1e3
+        if self.phase in (Phase.SEATED, Phase.INSERT) and self.engaged(data):
+            if jumped:
+                self.safe_stop(data, f"car moved {moved:.1f} mm while plug engaged: holding, no further force")
+            return  # once engaged the target is frozen
+        self.socket_pos = np.array(position, dtype=float)
+        self.rot_d = np.array(rotation, dtype=float).reshape(3, 3)
+        self.axis = self.rot_d[:, 2].copy()
+        if not jumped:
+            if self.phase == Phase.ALIGN:
+                self.ref_pos = self._standoff_point()  # small correction: keep servoing onto the axis
+            return
+        if data.time - self._last_jump > 1.0:  # one continuous car movement counts as one re-plan
+            self.replans += 1
+        self._last_jump = float(data.time)
+        if self.replans > self.limits.max_replans:
+            self.safe_stop(data, "target keeps moving: giving up")
+        elif self.phase == Phase.INSERT:
+            self.ref_pos = data.site_xpos[self.plug].copy()
+            self._set_phase(data, Phase.RETRACT, f"car moved {moved:.1f} mm before engagement: backing out to re-align")
+        elif self.phase == Phase.ALIGN:
+            self._set_phase(data, Phase.APPROACH, f"car moved {moved:.1f} mm: re-planning approach")
+        else:
+            self._log(data, f"target updated ({moved:.1f} mm): re-planning")
 
     def _standoff_point(self) -> np.ndarray:
         return self.socket_pos - self.axis * self.limits.standoff
@@ -193,8 +242,12 @@ class InsertionController:
         self.peak["strain_relief"] = max(self.peak["strain_relief"], cab.strain_relief_load)
 
         # Hard safety limits apply in every active phase.
-        if self.phase in (Phase.APPROACH, Phase.ALIGN, Phase.INSERT):
-            if force > lim.contact_force_max:
+        if self.phase in (Phase.APPROACH, Phase.ALIGN, Phase.INSERT, Phase.SEATED):
+            if force > lim.contact_force_max and self.engaged(data):
+                self.safe_stop(data, f"contact force {force:.1f} N while engaged: holding (not chasing)")
+            elif self.phase == Phase.SEATED:
+                pass
+            elif force > lim.contact_force_max:
                 self._start_retract(data, f"contact force {force:.1f} N > {lim.contact_force_max} N")
             elif cab.max_tension > lim.cable_tension_max:
                 self._start_retract(data, f"cable tension {cab.max_tension:.1f} N > {lim.cable_tension_max} N")
@@ -203,13 +256,17 @@ class InsertionController:
                     data, f"strain relief load {cab.strain_relief_load:.1f} N > {lim.strain_relief_max} N"
                 )
 
-        if self.phase == Phase.APPROACH:
+        if self.hold and self.phase in (Phase.APPROACH, Phase.ALIGN):
+            self._aligned_since = None  # perception unreliable: hold position, no progress
+        elif self.phase == Phase.APPROACH:
             if self._move_ref_towards(self._standoff_point(), lim.approach_speed, dt):
                 self._set_phase(data, Phase.ALIGN, "reference reached standoff")
 
         elif self.phase == Phase.ALIGN:
+            mujoco.mj_objectVelocity(m, data, mujoco.mjtObj.mjOBJ_SITE, self.plug, self._vel, 0)
             ok = (
-                al.lateral < lim.align_lateral_tol
+                float(np.linalg.norm(self._vel[3:])) < lim.align_max_speed
+                and al.lateral < lim.align_lateral_tol
                 and al.angle < lim.align_angle_tol
                 and abs(al.axial + lim.standoff) < lim.align_axial_tol
                 and cf.count == 0
@@ -230,6 +287,11 @@ class InsertionController:
         elif self.phase == Phase.INSERT:
             if al.axial >= -(PIN_LENGTH - lim.seat_depth):
                 self._set_phase(data, Phase.SEATED, f"seated, engagement {(al.axial + PIN_LENGTH) * 1e3:.1f} mm")
+            elif (al.lateral > lim.insert_lateral_max or al.angle > lim.insert_angle_max) and self.engaged(data):
+                self.safe_stop(
+                    data,
+                    f"plug pushed off axis while engaged (lateral {al.lateral * 1e3:.2f} mm): holding, no further force",
+                )
             elif al.lateral > lim.insert_lateral_max or al.angle > lim.insert_angle_max:
                 self._start_retract(
                     data,
@@ -255,7 +317,7 @@ class InsertionController:
             # Hold the plug in place with gentle insertion bias, no further advance.
             pass
 
-        if self.phase != Phase.ESTOP:
+        if self.phase not in (Phase.ESTOP, Phase.SAFE_STOP):
             self._track(data)
         data.ctrl[self.act] = self.q_cmd
 
@@ -309,7 +371,7 @@ class InsertionController:
         dq += null @ (self.posture_gain * (self.q_home - self.q_ref))
         q = data.qpos[self.qadr]
         self.q_ref = self.q_ref + dq * m.opt.timestep
-        self.q_ref = np.clip(self.q_ref, q - self.limits.joint_lead_max, q + self.limits.joint_lead_max)
+        self.q_ref = np.clip(self.q_ref, q - self.lead, q + self.lead)
         self.q_ref = np.clip(self.q_ref, self.q_lo, self.q_hi)
         # Proportional lead plus model-based Coulomb friction compensation: the original servos
         # need |ctrl - q| > frictionloss / kp before a joint moves at all, which otherwise causes

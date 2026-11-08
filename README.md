@@ -198,3 +198,26 @@ Sample layouts: [single avoidance box](layouts/box_avoidance.json) and
 [stone + slope](layouts/stone_slope.json). The batch runner now defaults to the same
 scenario builder and sensor-based controller as the panel; use `--engine legacy` only
 for the earlier privileged-map baseline.
+
+## Perception-driven autonomy, car park and judge tests (merged from `sos-AutoCharger-AI`)
+
+These run alongside the control panel and use the same scene builder (`src/autocharge/scene.py`).
+
+```bash
+python scripts/interactive_test.py          # 11 judge challenges in the car park (keys 1-0 and -, SPACE starts)
+python scripts/autonomy_demo.py             # camera-driven autonomy; arrow keys push the car live
+python scripts/watch_tests.py               # replay the autonomy test scenarios with a PASS/FAIL checker
+python scripts/benchmark.py                 # held-out trials: autonomous vs pre-programmed controller
+python -m pytest tests                      # all automated tests from both branches
+```
+
+- **Perception** (`perception.py`): robot camera on the connector, ArUco fiducial beside the inlet, `solvePnP`
+  pose with reprojection checks. Rule-based OpenCV pipeline; no learned model.
+- **Autonomy** (`autonomy.py`): reachability check with the robot's own IK, drives the base closer when needed,
+  360 deg search at three camera tilts, holds when perception is stale, re-plans when the car moves,
+  safe stop on unexpected touch or when the car moves while the plug is engaged.
+- **Navigation** (`navigation.py`): simulated planar LiDAR -> occupancy grid -> A* -> waypoint driving.
+- **Independent evaluator** (`evaluation.py`): judges docking from the physical socket pose; the agent never imports it.
+
+Design notes, measured results and limitations: `docs/autocharge_cable_connector.md`, one-page summary:
+`docs/technical_summary.pdf`.
