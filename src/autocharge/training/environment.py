@@ -35,7 +35,7 @@ class CourseEnv:
     def reset(self, seed=0, alignment_offset_mm=0.0):
         self.obstacles = make_course(self.level, seed, self.manual, self.mode)
         self.model, self.info = build_model(
-            dataclasses.replace(DRIVE_IN_PARAMS, obstacles=self.obstacles)
+            dataclasses.replace(DRIVE_IN_PARAMS, obstacles=self.obstacles, environment="classic")
         )
         self.data = mujoco.MjData(self.model)
         # Keep the original 0.5 s settling interval; record it separately from operation.

@@ -111,6 +111,18 @@ class SceneParams:
     cable_length: float | None = None  # optional fixed physical length, never enlarged at reset
     movable_vehicle: bool = False
     operator_cameras: bool = False
+    # "carpark": 12-bay car park + full-size 4.6 m target car (judge app, autonomy/navigation tests).
+    # "classic": plain scene + original compact car (control panel, obstacle courses, Level 11),
+    # i.e. the geometry those levels were tuned and verified in.
+    # "auto": classic when course obstacles, a joint-driven vehicle or operator cameras are
+    # requested (the panel/course feature set), otherwise carpark.
+    environment: str = "auto"
+
+    @property
+    def scene_kind(self) -> str:
+        if self.environment != "auto":
+            return self.environment
+        return "classic" if (self.obstacles or self.movable_vehicle or self.operator_cameras) else "carpark"
 
 
 @dataclasses.dataclass
@@ -170,6 +182,26 @@ def _ring_geoms(cx: float, cy: float, inner_r: float, prefix: str) -> list[str]:
     return geoms
 
 
+def _car_xml_for(p: SceneParams, car_face_x: float, sy: float) -> str:
+    if p.scene_kind == "classic":
+        return f'''      <geom name="car_body" class="vehicle" type="box" pos="{car_face_x + 0.9:.6g} {sy + 0.2:.6g} 0.75"
+            size="0.9 1.0 0.43" rgba="0.62 0.05 0.06 1"/>
+      <geom name="car_wheel" type="cylinder" pos="{car_face_x + 0.45:.6g} {sy - 0.55:.6g} 0.32"
+            size="0.32 0.11" quat="0.7071 0.7071 0 0" rgba="0.08 0.08 0.08 1" contype="0" conaffinity="0"/>'''
+    return f'''      <geom name="car_body" class="vehicle" type="box" pos="{car_face_x + 0.925:.6g} {sy + 1.55:.6g} 0.67"
+            size="0.925 2.3 0.35" rgba="0.62 0.05 0.06 1"/>
+      <geom name="car_cabin" type="box" pos="{car_face_x + 0.95:.6g} {sy + 1.45:.6g} 1.22" size="0.78 1.25 0.2"
+            rgba="0.10 0.12 0.16 1" contype="0" conaffinity="0"/>
+      <geom name="car_wheel" type="cylinder" pos="{car_face_x + 0.10:.6g} {sy + 0.05:.6g} 0.34" size="0.34 0.11"
+            quat="0.7071 0 0.7071 0" rgba="0.06 0.06 0.06 1" contype="0" conaffinity="0"/>
+      <geom name="car_wheel_2" type="cylinder" pos="{car_face_x + 0.10:.6g} {sy + 2.92:.6g} 0.34" size="0.34 0.11"
+            quat="0.7071 0 0.7071 0" rgba="0.06 0.06 0.06 1" contype="0" conaffinity="0"/>
+      <geom name="car_wheel_3" type="cylinder" pos="{car_face_x + 1.75:.6g} {sy + 0.05:.6g} 0.34" size="0.34 0.11"
+            quat="0.7071 0 0.7071 0" rgba="0.06 0.06 0.06 1" contype="0" conaffinity="0"/>
+      <geom name="car_wheel_4" type="cylinder" pos="{car_face_x + 1.75:.6g} {sy + 2.92:.6g} 0.34" size="0.34 0.11"
+            quat="0.7071 0 0.7071 0" rgba="0.06 0.06 0.06 1" contype="0" conaffinity="0"/>'''
+
+
 def _socket_xml(p: SceneParams) -> str:
     rot = socket_rotation()
     quat = _mat2quat(rot)
@@ -182,18 +214,7 @@ def _socket_xml(p: SceneParams) -> str:
     car_face_x = sx + CAVITY_DEPTH + 0.015
     return f"""
     <body name="vehicle" pos="0 0 0" mocap="true">
-      <geom name="car_body" class="vehicle" type="box" pos="{car_face_x + 0.925:.6g} {sy + 1.55:.6g} 0.67"
-            size="0.925 2.3 0.35" rgba="0.62 0.05 0.06 1"/>
-      <geom name="car_cabin" type="box" pos="{car_face_x + 0.95:.6g} {sy + 1.45:.6g} 1.22" size="0.78 1.25 0.2"
-            rgba="0.10 0.12 0.16 1" contype="0" conaffinity="0"/>
-      <geom name="car_wheel" type="cylinder" pos="{car_face_x + 0.10:.6g} {sy + 0.05:.6g} 0.34" size="0.34 0.11"
-            quat="0.7071 0 0.7071 0" rgba="0.06 0.06 0.06 1" contype="0" conaffinity="0"/>
-      <geom name="car_wheel_2" type="cylinder" pos="{car_face_x + 0.10:.6g} {sy + 2.92:.6g} 0.34" size="0.34 0.11"
-            quat="0.7071 0 0.7071 0" rgba="0.06 0.06 0.06 1" contype="0" conaffinity="0"/>
-      <geom name="car_wheel_3" type="cylinder" pos="{car_face_x + 1.75:.6g} {sy + 0.05:.6g} 0.34" size="0.34 0.11"
-            quat="0.7071 0 0.7071 0" rgba="0.06 0.06 0.06 1" contype="0" conaffinity="0"/>
-      <geom name="car_wheel_4" type="cylinder" pos="{car_face_x + 1.75:.6g} {sy + 2.92:.6g} 0.34" size="0.34 0.11"
-            quat="0.7071 0 0.7071 0" rgba="0.06 0.06 0.06 1" contype="0" conaffinity="0"/>
+{_car_xml_for(p, car_face_x, sy)}
       <body name="socket" pos="{_fmt(p.socket_pos)}" quat="{_fmt(quat)}">
         <site name="socket_face" pos="0 0 0" size="0.004" rgba="0 1 0 1" group="4"/>
         <geom name="marker_sticker" type="box" pos="0.12 0.018 0.0585" size="0.02 0.02 0.0005"
@@ -291,7 +312,7 @@ def _scene_xml(p: SceneParams, seg: float | None) -> str:
     <geom name="obstacle" type="box" pos="0.57 -0.30 0.80" size="0.008 0.06 0.06"
           rgba="0.95 0.6 0.1 0" contype="4" conaffinity="4"/>
     <camera name="socket_view" pos="0.25 -0.32 0.95" xyaxes="0 -1 0 0.25 0 0.97"/>
-    {_carpark_xml()}
+    {_carpark_xml() if p.scene_kind == 'carpark' else ''}
     {_charger_xml_placeholder()}
     {_socket_xml(p)}
   </worldbody>

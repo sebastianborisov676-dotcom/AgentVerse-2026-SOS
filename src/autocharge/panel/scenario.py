@@ -89,6 +89,16 @@ def augment_spec(spec, params):
     if not params.movable_vehicle:
         return
     vehicle = spec.body("vehicle")
+    # The scene declares the vehicle as a mocap body (judge scenarios teleport it);
+    # the panel drives it through joints and position servos instead.
+    vehicle.mocap = False
+    # MuJoCo only allows plane geoms on static bodies: keep the ArUco marker as a thin,
+    # massless, non-colliding box once the vehicle has joints.
+    marker = spec.geom("aruco_marker")
+    if marker is not None:
+        marker.type = mujoco.mjtGeom.mjGEOM_BOX
+        marker.size = [marker.size[0], marker.size[1], 0.0002]
+        marker.mass = 0
     pivot = np.array(spec.geom("car_body").pos)
     pivot[2] = 0
     vehicle.pos = pivot
@@ -146,6 +156,7 @@ def build_scenario(config):
         empty_params = dataclasses.replace(
             DRIVE_IN_PARAMS, base_start=pose, obstacles=(), cable_length=CABLE_LENGTH,
             movable_vehicle=config.level >= 9, operator_cameras=True,
+            environment="classic",
         )
         empty_model, _ = build_model(empty_params)
         empty_data = mujoco.MjData(empty_model)
@@ -185,6 +196,7 @@ def build_scenario(config):
         cable_length=CABLE_LENGTH,
         movable_vehicle=config.level >= 9,
         operator_cameras=True,
+        environment="classic",
     )
     model, info = build_model(params)
     data = mujoco.MjData(model)
