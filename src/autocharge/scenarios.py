@@ -128,14 +128,11 @@ class ScenarioManager:
         self.m.geom_rgba[self.m.geom("marker_sticker").id, 3] = 1.0 if on else 0.0
         self.sticker_on = on
 
-    PROPS = {
-        "bay": ("bay_line_l", "bay_line_r", "bay_line_back", "lane_arrow"),
-        "carpark": ("pillar_1", "pillar_2", "parked_car", "parked_car_wheel"),
-    }
+    PROPS: dict = {}  # the car park is permanent scenery now; kept for compatibility
 
     def set_props(self, *groups: str) -> None:
         """Show (and make solid, where they have collision) the chosen environment prop groups."""
-        on = {n for g in groups for n in self.PROPS[g]}
+        on = {n for g in groups for n in self.PROPS.get(g, ())}
         for names in self.PROPS.values():
             for n in names:
                 g = self.m.geom(n).id
@@ -150,6 +147,44 @@ class ScenarioManager:
             self._car_rgba0 = self.m.geom_rgba[self.m.geom("car_body").id].copy()
         self.m.geom_rgba[self.m.geom("car_body").id] = rgba
 
+    def _show(self, name: str, pos, on: bool, solid_bits: int = 3, quat=None) -> None:
+        g = self.m.geom(name).id
+        self.m.geom_pos[g] = pos if on else (0.0, 0.0, -5.0)
+        if quat is not None:
+            self.m.geom_quat[g] = quat
+        self.m.geom_rgba[g, 3] = 1.0 if on else 0.0
+        if self.m.geom_contype[g] in (3, 4):
+            self.m.geom_contype[g] = self.m.geom_conaffinity[g] = solid_bits if on else 4
+
+    def set_bags(self, *positions) -> None:
+        """Place up to two black rubbish bags on the floor at world (x, y); nothing = remove them."""
+        for i, name in enumerate(("bin_bag", "bin_bag_2")):
+            if i < len(positions) and positions[i] is not None:
+                x, y = positions[i]
+                h = self.m.geom_size[self.m.geom(name).id][2]
+                self._show(name, (x, y, h), True)
+            else:
+                self._show(name, None, False)
+        self.bags = positions
+
+    def set_neighbours(self, data, on: bool, gap: float = 0.7, side_gap: float = 0.6) -> None:
+        """Three parked cars around the target: in front, behind and on the side away from the inlet."""
+        mujoco.mj_forward(self.m, data)
+        g = self.m.geom("car_body").id
+        c = data.geom_xpos[g].copy()
+        r = data.geom_xmat[g].reshape(3, 3)
+        half = self.m.geom_size[g]
+        quat = np.zeros(4)
+        mujoco.mju_mat2Quat(quat, r.ravel())
+        offsets = {"nb_front": r @ np.array([0.0, 2 * half[1] + gap, 0.0]),
+                   "nb_back": r @ np.array([0.0, -(2 * half[1] + gap), 0.0]),
+                   "nb_side": r @ np.array([2 * half[0] + side_gap, 0.0, 0.0])}
+        for name, off in offsets.items():
+            body = c + off
+            self._show(f"{name}_body", body, on, quat=quat)
+            self._show(f"{name}_cabin", body + r @ np.array([0.02, -0.1, 0.55]), on, quat=quat)
+        self.neighbours = on
+
     def restore(self) -> None:
         """Undo model-level changes (lighting, flap, marker cover) so the model can be reused."""
         self.set_lighting(1.0)
@@ -157,6 +192,10 @@ class ScenarioManager:
         self.set_obstacle(False)
         self.set_sticker(False)
         self.set_props()
+        self.set_bags()
+        for n in ("nb_front", "nb_back", "nb_side"):
+            self._show(f"{n}_body", None, False)
+            self._show(f"{n}_cabin", None, False)
         if hasattr(self, "_car_rgba0"):
             self.set_car_colour(self._car_rgba0)
         self.cover_marker(False)

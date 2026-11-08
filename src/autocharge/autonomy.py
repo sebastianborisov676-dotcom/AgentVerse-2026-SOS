@@ -24,6 +24,7 @@ import numpy as np
 
 from autocharge.base_controller import DriveController, DriveLimits, DrivePhase, TurnDriveTurn
 from autocharge.controller import InsertionController, InsertionLimits, Phase
+from autocharge.navigation import Lidar, OccupancyGrid, WaypointDrive, path_length, plan_path
 from autocharge.perception import PortEstimate, PortPerception, PoseFilter
 from autocharge.scene import ARM_JOINTS, BASE_JOINTS, arm_dof_indices, solve_ik
 
@@ -124,6 +125,12 @@ class AutonomousAgent:
         veh = model.body("vehicle").id
         self.vehicle_bodies = {bb for bb in range(model.nbody) if bb == veh or model.body_parentid[bb] == veh}
         self.floor = model.geom("floor").id
+        # Obstacle sensing for driving: planar LiDAR on the base (mobile robots only).
+        self.lidar = Lidar(model) if self.mobile else None
+        self.grid: OccupancyGrid | None = None
+        self.nav_path: list | None = None
+        self.lidar_points = np.zeros((0, 2))
+        self._next_rescan = 0.0
         self._f6 = np.zeros(6)
 
     # ----------------------------------------------------------------------------------------
@@ -299,6 +306,9 @@ class AutonomousAgent:
             return
         if self.state == AgentState.REPOSITIONING:
             self._hold_arm(data)
+            self._check_route(data)
+            if self.drive is None:
+                return
             if self.drive.phase == DrivePhase.DOCKED:
                 self.state = AgentState.SETTLING
                 self._settle_start = t
@@ -382,18 +392,82 @@ class AutonomousAgent:
             ok_there, pe2, re2 = self.reachable(data, pos, rot, base=tgt)
             if ok_there:
                 self.repositions += 1
-                self.drive = TurnDriveTurn(self.m, data, dock=tgt, limits=DriveLimits(timeout=60.0))
-                self.state = AgentState.REPOSITIONING
-                self._decide(data, f"inlet out of arm reach (IK miss {pe * 1e3:.0f} mm): driving base "
+                self._decide(data, f"inlet out of arm reach (IK miss {pe * 1e3:.0f} mm): need to drive base "
                                    f"{dist:.2f} m to x={tgt[0]:.2f} y={tgt[1]:.2f} yaw={tgt[2]:.1f} deg")
-                return
-            why = f"not reachable even after driving (IK miss {pe2 * 1e3:.0f} mm)"
+                if self._start_drive(data, tgt):
+                    self.state = AgentState.REPOSITIONING
+                    return
+                why = "no collision-free route for the base (LiDAR occupancy grid)"
+            else:
+                why = f"not reachable even after driving (IK miss {pe2 * 1e3:.0f} mm)"
         else:
             why = f"outside arm reach (IK miss {pe * 1e3:.0f} mm, {re:.1f} deg)"
         self.unreachable = True
         self._brake(data)
         self.state = AgentState.FAILED
         self._decide(data, f"failed: inlet unreachable, {why}; not moving")
+
+    def _start_drive(self, data, tgt) -> bool:
+        """LiDAR scan -> occupancy grid -> A* route to the parking pose. False if no route exists."""
+        cur = self._base_pose(data)
+        pts, _, _ = self.lidar.scan(data)
+        self.lidar_points = pts
+        dist = math.hypot(tgt[0] - cur[0], tgt[1] - cur[1])
+        self.grid = OccupancyGrid(center=((cur[0] + tgt[0]) / 2, (cur[1] + tgt[1]) / 2), size=max(6.0, 2 * dist + 3.0))
+        self.grid.add_points(pts)
+        path = plan_path(self.grid, cur[:2], tgt[:2])
+        if path is None:
+            self._decide(data, f"LiDAR: {len(pts)} returns, route to the parking pose is blocked")
+            return False
+        self.nav_path = path
+        direct = len(path) == 2
+        if direct:
+            self.drive = TurnDriveTurn(self.m, data, dock=tgt, limits=DriveLimits(timeout=60.0))
+            self._decide(data, f"LiDAR: direct route clear ({len(pts)} returns), driving {dist:.2f} m")
+        else:
+            self.drive = WaypointDrive(self.m, data, path, tgt[2])
+            self._decide(data, f"LiDAR: obstacle on the direct route, detour {path_length(path):.2f} m via "
+                               f"{len(path) - 2} waypoint(s) (direct {dist:.2f} m)")
+        self._next_rescan = float(data.time) + 0.5
+        return True
+
+    def _check_route(self, data) -> None:
+        """While driving: re-scan, add to the map, re-plan if the remaining route became blocked."""
+        if self.grid is None or self.nav_path is None or data.time < self._next_rescan:
+            return
+        self._next_rescan = float(data.time) + 0.5
+        pts, _, _ = self.lidar.scan(data)
+        self.lidar_points = pts
+        before = self.grid.occ.copy()
+        self.grid.add_points(pts)
+        if not (self.grid.occ & ~before).any():
+            return  # nothing new in the map: keep following the current route
+        cur = np.array(self._base_pose(data)[:2])
+        ahead = [cur] + [w for w in getattr(self.drive, "waypoints", [self.drive.dock])]
+        saved = self.grid.blocked.copy()
+        self.grid.blocked = self.grid.mask(0.30)  # bare footprint: tolerate small path-following drift
+        si, sj = self.grid.cell(cur)
+        rr = int(0.3 / self.grid.res)
+        self.grid.blocked[max(0, si - rr):si + rr + 1, max(0, sj - rr):sj + rr + 1] = False
+        clear = all(self.grid.free_line(a, b) for a, b in zip(ahead[:-1], ahead[1:], strict=True))
+        self.grid.blocked = saved
+        if clear:
+            return
+        tgt_xy = ahead[-1]
+        yaw = getattr(self.drive, "final_yaw", None)
+        if yaw is None:
+            yaw = math.degrees(self.drive.dock_yaw)
+        path = plan_path(self.grid, cur, tgt_xy)
+        if path is None:
+            self.drive = None
+            self._brake(data)
+            self.state = AgentState.SAFE_STOP
+            self._decide(data, "safe stop: LiDAR shows the route is now blocked and there is no way round")
+            return
+        self.nav_path = path
+        self.drive = WaypointDrive(self.m, data, path, yaw) if len(path) > 2 else \
+            TurnDriveTurn(self.m, data, dock=(float(tgt_xy[0]), float(tgt_xy[1]), yaw), limits=DriveLimits(timeout=60.0))
+        self._decide(data, f"LiDAR: new obstacle ahead, re-planned route ({path_length(path):.2f} m)")
 
     def _observe(self, data) -> None:
         est = self.perception.observe(data)
